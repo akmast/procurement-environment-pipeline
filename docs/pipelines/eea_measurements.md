@@ -15,15 +15,21 @@ This is the same API the community `airbase` Python client wraps.
 
 ### Step 1 — ask which files exist
 
+One request **per pollutant** — not one request covering all five. This
+way we already know which pollutant a file belongs to from the request
+that produced it, instead of relying on the numeric `Pollutant` code
+inside the file itself (see "Parquet schema" below) or merging by that
+code later in normalization.
+
 ```
 Method: POST
 URL:    https://eeadmz1-downloads-api-appservice.azurewebsites.net/ParquetFile/urls
 
-JSON body:
+JSON body (one call per pollutant in POLLUTANTS):
 {
     "countries": ["DE"],
     "cities": [],
-    "pollutants": ["PM10", "PM2.5", "NO2", "O3", "SO2"],
+    "pollutants": ["PM10"],
     "dataset": 1,
     "dateTimeStart": "2025-01-01",
     "dateTimeEnd": "2025-01-31",
@@ -71,31 +77,42 @@ saved to Bronze, untouched
 ## Ingestion — `ingestion/eea/measurements.py`
 
 Downloads every file returned by step 1 and writes it to disk exactly as
-received — no parsing, no column selection, no filtering, no dedup:
+received — no parsing, no column selection, no filtering, no dedup. Raw
+storage is partitioned by year **and pollutant**, so the pollutant is
+already known from the path, no lookup needed:
 
 ```
-data/raw/eea/measurements/<year>/<original_filename>.parquet
+data/raw/eea/measurements/<year>/<pollutant>/<original_filename>.parquet
 data/raw/eea/measurements/manifest.jsonl   — one line per downloaded file
-                                              (url, year, downloaded_at,
-                                              size_bytes, local_path)
+                                              (url, year, pollutant,
+                                              downloaded_at, size_bytes,
+                                              local_path)
 ```
+
+`<pollutant>` is exactly the string we requested (`"PM10"`, `"PM2.5"`,
+`"NO2"`, `"O3"`, `"SO2"`) — reliable by construction, since it's our own
+request parameter, not something decoded from the response.
 
 Three modes:
 
 - **test** — last 5 days, PM10 only, writes to `data/raw/eea/test/`
   (doesn't touch the real dataset or manifest).
-- **historical** — loops over `from_year..to_year`, one API call + one
-  set of downloads per year.
+- **historical** — loops over `from_year..to_year` × `POLLUTANTS`, one
+  API call + one set of downloads per year/pollutant pair.
 - **refresh_current** — deletes the current year's files and manifest
-  entries, then re-downloads the current year from scratch.
+  entries, then re-downloads the current year (all pollutants) from
+  scratch.
 
 ## Parquet schema (confirmed via a live file, 2026-08-19)
 
 ```
 Samplingpoint    e.g. "SPO.DE_DENW105_PM1_dataGroup2"
 Pollutant        numeric code, NOT the "PM10"-style name from the
-                 request — e.g. 5. No code→name mapping exists in the
-                 pipeline yet; needed before this column is human-readable.
+                 request — e.g. 5. Not needed to identify the pollutant:
+                 that's already known from the folder the file was
+                 downloaded into (see "Ingestion" above). Kept in the
+                 normalized schema as `pollutant_code` for reference,
+                 but nothing merges on it.
 Start, End       measurement window (the two columns run_test() already
                  reads for its logged time range)
 Value            float
@@ -110,23 +127,24 @@ FkObservationId  (or similarly-named id column — truncated in the sample seen)
 
 ## Normalization — `normalization/eea/measurements.py`
 
-Not implemented yet. Ingestion doesn't transform anything today, so
-there's nothing to move here — this module will eventually combine the
-per-file Parquet data into one dataset and handle dedup/schema
-normalization (including mapping the numeric `Pollutant` code to a name)
-before joining with station metadata.
+Not implemented yet — schema is being discussed with the project owner
+before writing this module (see chat), specifically: renamed/typed
+column list, how `Value`/`Unit` are handled, and whether normalized
+output stays partitioned like raw or gets combined into one dataset.
+Pollutant identity comes from the raw file's folder path, not from a
+merge on the numeric `Pollutant` code.
 
 ## Data flow
 
 ```
-POST /ParquetFile/urls (countries=["DE"], date range, pollutants)
-        │
+POST /ParquetFile/urls (countries=["DE"], date range, pollutants=[<one pollutant>])
+        │  one call per pollutant in POLLUTANTS
         ▼
-list of Parquet file URLs
+list of Parquet file URLs (for that pollutant)
         │
         ▼
 GET each URL → Parquet bytes
         │
         ▼
-data/raw/eea/measurements/<year>/*.parquet   (untouched)
+data/raw/eea/measurements/<year>/<pollutant>/*.parquet   (untouched)
 ```

@@ -1,11 +1,17 @@
 """
 Raw EEA measurements ingestion — test / historical / refresh_current.
 
+One API request per pollutant, not one request covering all pollutants —
+this way we already know which pollutant a file belongs to from the
+request we made for it, and can lay raw storage out accordingly, instead
+of relying on the numeric `Pollutant` code inside the file or merging by
+that code later.
+
 Saves parquet files exactly as received from the API, untouched. Country
 scope is applied server-side via the `countries` field the API's own
 request payload accepts — no other filtering, no date filtering beyond
-the request window, no month partitioning, no geo join, no dedup. All of
-that belongs to the normalization layer.
+the request window, no schema normalization, no dedup. All of that
+belongs to the normalization layer.
 
     from ingestion.eea.measurements import run
     run(mode="test")
@@ -15,13 +21,26 @@ that belongs to the normalization layer.
 import json
 import logging
 import shutil
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 
-from .http_client import request_with_retry
+# Make `common`/`ingestion` importable and logging configured regardless of
+# how this file is run (python -m, import, Jupyter, or run directly).
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
+from common.logging_config import setup_logging
+
+try:
+    from .http_client import request_with_retry
+except ImportError:
+    from http_client import request_with_retry
+
+setup_logging()
 logger = logging.getLogger(__name__)
 
 API_BASE = "https://eeadmz1-downloads-api-appservice.azurewebsites.net"
@@ -33,7 +52,7 @@ TEST_DIR = Path("data/raw/eea/test")
 TEST_DIR.mkdir(parents=True, exist_ok=True)
 
 COUNTRY = "DE"  # server-side filter — the API's `countries` field accepts a list of codes
-POLLUTANTS = ["PM10", "PM2.5", "NO2", "O3", "SO2"]
+POLLUTANTS = ["PM10", "PM2.5", "NO2", "O3", "SO2"]  # one request per entry, not one request for all
 DATASET = 1  # E2a / Unverified / UTD
 AGGREGATION_TYPE = "day"
 
@@ -48,11 +67,11 @@ def validate_date(user_date: str) -> str:
     return user_date
 
 
-def build_request_body(from_date: str, to_date: str, pollutants: list = None) -> dict:
+def build_request_body(from_date: str, to_date: str, pollutant: str) -> dict:
     return {
         "countries": [COUNTRY],
         "cities": [],
-        "pollutants": pollutants or POLLUTANTS,
+        "pollutants": [pollutant],
         "dataset": DATASET,
         "dateTimeStart": validate_date(from_date),
         "dateTimeEnd": validate_date(to_date),
@@ -61,8 +80,8 @@ def build_request_body(from_date: str, to_date: str, pollutants: list = None) ->
     }
 
 
-def get_file_urls(from_date: str, to_date: str, pollutants: list = None) -> list:
-    payload = build_request_body(from_date, to_date, pollutants)
+def get_file_urls(from_date: str, to_date: str, pollutant: str) -> list:
+    payload = build_request_body(from_date, to_date, pollutant)
     resp = request_with_retry("POST", URLS_ENDPOINT, json=payload)
 
     raw_text = resp.content.decode("utf-8-sig", errors="replace")
@@ -81,7 +100,8 @@ def get_file_urls(from_date: str, to_date: str, pollutants: list = None) -> list
     else:
         raise RuntimeError(f"Unexpected /ParquetFile/urls response shape: {type(data)}")
 
-    logger.info("Requested file list | from=%s to=%s -> %s files", from_date, to_date, len(urls))
+    logger.info("Requested file list | from=%s to=%s pollutant=%s -> %s files",
+                from_date, to_date, pollutant, len(urls))
     return urls
 
 
@@ -112,18 +132,19 @@ def remove_manifest_entries_for_year(year: int):
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-def _download_and_save(url: str, year_dir: Path, i: int, total: int, year: int):
+def _download_and_save(url: str, dest_dir: Path, i: int, total: int, year: int, pollutant: str):
     pct = int(i / total * 100)
     filename = Path(url).name or f"file_{i}.parquet"
-    logger.info("[%s/%s] %s%% — downloading %s", i, total, pct, filename)
+    logger.info("[%s/%s] %s%% — downloading %s (pollutant=%s)", i, total, pct, filename, pollutant)
 
     content = download_file(url)
-    local_path = year_dir / filename
+    local_path = dest_dir / filename
     local_path.write_bytes(content)
 
     append_manifest_entry({
         "url": url,
         "year": year,
+        "pollutant": pollutant,
         "downloaded_at": datetime.now(timezone.utc).isoformat(),
         "size_bytes": len(content),
         "local_path": str(local_path),
@@ -132,18 +153,26 @@ def _download_and_save(url: str, year_dir: Path, i: int, total: int, year: int):
     return len(content)
 
 
-def download_year(year: int) -> dict:
-    year_dir = OUT_DIR / str(year)
-    year_dir.mkdir(parents=True, exist_ok=True)
+def download_pollutant_range(year: int, pollutant: str, from_date: str, to_date: str) -> int:
+    """Download every file for one pollutant within a date range. Returns file count."""
+    pollutant_dir = OUT_DIR / str(year) / pollutant
+    pollutant_dir.mkdir(parents=True, exist_ok=True)
 
-    urls = get_file_urls(f"{year}-01-01", f"{year}-12-31")
-    total_bytes = 0
+    urls = get_file_urls(from_date, to_date, pollutant)
     for i, url in enumerate(urls, start=1):
-        total_bytes += _download_and_save(url, year_dir, i, len(urls), year)
+        _download_and_save(url, pollutant_dir, i, len(urls), year, pollutant)
 
-    logger.info("Year finished | year=%s files=%s total_size_kb=%.1f",
-                year, len(urls), total_bytes / 1024)
-    return {"year": year, "files": len(urls)}
+    logger.info("Pollutant finished | year=%s pollutant=%s files=%s", year, pollutant, len(urls))
+    return len(urls)
+
+
+def download_year(year: int) -> dict:
+    total_files = sum(
+        download_pollutant_range(year, pollutant, f"{year}-01-01", f"{year}-12-31")
+        for pollutant in POLLUTANTS
+    )
+    logger.info("Year finished | year=%s files=%s", year, total_files)
+    return {"year": year, "files": total_files}
 
 
 # --------------------------------------------------------------------------
@@ -156,7 +185,8 @@ def run_test():
     to_date = (datetime.now(timezone.utc) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     from_date = (datetime.now(timezone.utc) - pd.Timedelta(days=5)).strftime("%Y-%m-%d")
 
-    urls = get_file_urls(from_date, to_date, pollutants=["PM10"])
+    pollutant = "PM10"
+    urls = get_file_urls(from_date, to_date, pollutant)
     if not urls:
         logger.warning("Test request returned 0 files — check filters/date range")
         return
@@ -197,16 +227,12 @@ def run_refresh_current():
         logger.info("Deleted existing files for year=%s", year)
     remove_manifest_entries_for_year(year)
 
-    year_dir.mkdir(parents=True, exist_ok=True)
     to_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    urls = get_file_urls(f"{year}-01-01", to_date)
-
-    total_bytes = 0
-    for i, url in enumerate(urls, start=1):
-        total_bytes += _download_and_save(url, year_dir, i, len(urls), year)
-
-    logger.info("Refresh finished | year=%s files=%s total_size_kb=%.1f",
-                year, len(urls), total_bytes / 1024)
+    total_files = sum(
+        download_pollutant_range(year, pollutant, f"{year}-01-01", to_date)
+        for pollutant in POLLUTANTS
+    )
+    logger.info("Refresh finished | year=%s files=%s", year, total_files)
 
 
 def run(mode: str, from_year: int | None = None, to_year: int | None = None):
