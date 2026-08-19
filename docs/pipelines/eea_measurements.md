@@ -32,9 +32,10 @@ JSON body:
 }
 
 Expected response:
-A list of download URLs (one per Parquet file), or occasionally a plain
-text body with one URL per line — both shapes are handled. This response
-contains no measurement data yet, only file locations.
+Confirmed via a live call (2026-08-19): a plain text body, one URL per
+line (not JSON) — `get_file_urls()`'s JSON branch is defensive for a
+shape that hasn't actually been observed yet. This response contains no
+measurement data yet, only file locations.
 ```
 
 `countries` is a real request field of this API (confirmed via the
@@ -88,12 +89,32 @@ Three modes:
 - **refresh_current** — deletes the current year's files and manifest
   entries, then re-downloads the current year from scratch.
 
+## Parquet schema (confirmed via a live file, 2026-08-19)
+
+```
+Samplingpoint    e.g. "SPO.DE_DENW105_PM1_dataGroup2"
+Pollutant        numeric code, NOT the "PM10"-style name from the
+                 request — e.g. 5. No code→name mapping exists in the
+                 pipeline yet; needed before this column is human-readable.
+Start, End       measurement window (the two columns run_test() already
+                 reads for its logged time range)
+Value            float
+Unit             e.g. "ug.m-3"
+AggType          e.g. "day"
+Validity
+Verification
+ResultTime
+DataCapture
+FkObservationId  (or similarly-named id column — truncated in the sample seen)
+```
+
 ## Normalization — `normalization/eea/measurements.py`
 
 Not implemented yet. Ingestion doesn't transform anything today, so
 there's nothing to move here — this module will eventually combine the
 per-file Parquet data into one dataset and handle dedup/schema
-normalization before joining with station metadata.
+normalization (including mapping the numeric `Pollutant` code to a name)
+before joining with station metadata.
 
 ## Data flow
 
