@@ -16,10 +16,20 @@ Source: https://github.com/OP-TED/eForms-SDK/tree/main/codelists
 Requires: pip install requests
 """
 import logging
+import sys
 from pathlib import Path
 
 import requests
 
+# Make `common` importable and logging configured regardless of how this
+# file is run (python -m, import, Jupyter, or run directly).
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from common.logging_config import setup_logging
+
+setup_logging()
 logger = logging.getLogger(__name__)
 
 OUT_DIR = Path("data/reference/ted/codelists")

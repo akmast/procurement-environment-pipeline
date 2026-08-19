@@ -11,10 +11,25 @@ flattening, no dropped columns, no dedup — that belongs to normalization.
 """
 import json
 import logging
+import sys
 from pathlib import Path
 
-from .http_client import request_with_retry
+# Make `common`/`ingestion` importable and logging configured regardless of
+# how this file is run (python -m, import, Jupyter, or run directly —
+# a direct run has no package context, so the project root isn't on
+# sys.path yet, same reason .http_client needs the try/except below).
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
+from common.logging_config import setup_logging
+
+try:
+    from .http_client import request_with_retry
+except ImportError:
+    from http_client import request_with_retry
+
+setup_logging()
 logger = logging.getLogger(__name__)
 
 # Confirmed via live response (2026-08-14): fieldAliases = OBJECTID,
