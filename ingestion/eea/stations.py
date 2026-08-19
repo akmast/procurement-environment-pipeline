@@ -1,0 +1,94 @@
+"""
+EEA station metadata ingestion — standalone, no join with measurements.
+
+Saves the raw ArcGIS feature list exactly as received (each feature keeps
+its separate `attributes` + `geometry` shape). Country scope is applied
+server-side via the ArcGIS `where` filter — no other filtering, no
+flattening, no dropped columns, no dedup — that belongs to normalization.
+
+    from ingestion.eea.stations import run
+    run(mode="stations")
+"""
+import json
+import logging
+from pathlib import Path
+
+from .http_client import request_with_retry
+
+logger = logging.getLogger(__name__)
+
+# Confirmed via live response (2026-08-14): fieldAliases = OBJECTID,
+# AirQualityStation, Country, CountryCode, AirQualityStationEoICode,
+# AQStationName, stationClass, PopupInfo. Geometry (lat/lon) comes
+# separately per feature, requested here in WGS84 via outSR=4326.
+STATIONS_ENDPOINT = (
+    "https://air.discomap.eea.europa.eu/arcgis/rest/services/AirQuality/"
+    "AirQualityDownloadServiceEUMonitoringStations/MapServer/0/query"
+)
+STATIONS_PAGE_SIZE = 2000
+COUNTRY = "DE"  # server-side filter via ArcGIS `where` — CountryCode is a real schema field
+
+OUT_DIR = Path("data/raw/eea/stations")
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+STATIONS_RAW_PATH = OUT_DIR / "stations_raw.json"
+
+
+def fetch_raw_features() -> list[dict]:
+    """
+    Page through the ArcGIS query endpoint, filtered server-side to
+    COUNTRY via the `where` clause (standard ArcGIS REST attribute
+    filtering — not a post-fetch filter), and return the raw feature
+    list, untouched.
+    """
+    all_features = []
+    offset = 0
+    while True:
+        params = {
+            "where": f"CountryCode='{COUNTRY}'",
+            "outFields": "*",
+            "returnGeometry": "true",
+            "outSR": "4326",
+            "f": "json",
+            "resultOffset": offset,
+            "resultRecordCount": STATIONS_PAGE_SIZE,
+        }
+        resp = request_with_retry("GET", STATIONS_ENDPOINT, params=params)
+        data = resp.json()
+        if "error" in data:
+            raise RuntimeError(f"Stations query failed: {data['error']}")
+
+        features = data.get("features", [])
+        all_features.extend(features)
+        logger.info("Station page fetched | offset=%s count=%s", offset, len(features))
+
+        if not data.get("exceededTransferLimit") and len(features) < STATIONS_PAGE_SIZE:
+            break
+        if not features:
+            break
+        offset += len(features)
+
+    if not all_features:
+        raise RuntimeError("Stations query returned 0 features")
+
+    return all_features
+
+
+def run_stations():
+    logger.info("Starting EEA station metadata ingestion | mode=stations")
+    features = fetch_raw_features()
+    STATIONS_RAW_PATH.write_text(json.dumps(features, ensure_ascii=False))
+    logger.info("Raw stations saved | path=%s features=%s",
+                STATIONS_RAW_PATH.resolve(), len(features))
+
+
+def run(mode: str, **kwargs):
+    if mode == "stations":
+        run_stations()
+    else:
+        raise ValueError(f"Unknown mode {mode!r} — expected 'stations'")
+
+
+if __name__ == "__main__":
+    run(
+        mode="stations",  # Only supported mode — fetches the full raw station list
+    )
