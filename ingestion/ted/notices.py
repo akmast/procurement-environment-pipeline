@@ -79,6 +79,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from common.logging_config import setup_logging
+from common.manifest import StageResult
 from common.storage import append_text, exists, read_text, write_text
 
 setup_logging()
@@ -398,60 +399,75 @@ def update_state_if_newer(state_path: str, new_date: str, storage_mode: str) -> 
 # Modes
 # --------------------------------------------------------------------------
 
-def run_test(countries: list[str], storage_mode: str):
-    """One record per country, PAGE_NUMBER mode. Does not touch state.json or the dataset."""
+def run_test(countries: list[str], storage_mode: str) -> StageResult:
+    """One record per country, PAGE_NUMBER mode. Does not touch state.json
+    or the dataset. A failed country is isolated (logged + recorded in
+    failed_paths) and doesn't stop the rest of the batch."""
     logger.info("Starting TED ingestion | mode=test countries=%s storage_mode=%s", countries, storage_mode)
 
+    result = StageResult()
     for country in countries:
-        iso3 = iso2_to_iso3(country)
         paths = country_paths(country)
-        payload = {
-            "query": build_query(iso3, sort=True),
-            "fields": FIELDS,
-            "page": 1,
-            "limit": 1,
-            "paginationMode": "PAGE_NUMBER",
-        }
-        data = call_api(payload)
-        logger.info("API request completed | country=%s status=200", country)
-        logger.debug("Response top-level keys: %s", list(data.keys()))
+        try:
+            iso3 = iso2_to_iso3(country)
+            payload = {
+                "query": build_query(iso3, sort=True),
+                "fields": FIELDS,
+                "page": 1,
+                "limit": 1,
+                "paginationMode": "PAGE_NUMBER",
+            }
+            data = call_api(payload)
+            logger.info("API request completed | country=%s status=200", country)
+            logger.debug("Response top-level keys: %s", list(data.keys()))
 
-        notices = data.get("notices", data.get("results", []))
-        if not notices:
-            logger.warning("Test request returned 0 notices | country=%s — check the query filters", country)
-            continue
+            notices = data.get("notices", data.get("results", []))
+            if not notices:
+                logger.warning("Test request returned 0 notices | country=%s — check the query filters", country)
+                continue
 
-        logger.info("Notices received | country=%s count=%s", country, len(notices))
+            logger.info("Notices received | country=%s count=%s", country, len(notices))
 
-        write_text(paths["test"], json.dumps(notices, ensure_ascii=False, indent=2), storage_mode)
-        logger.info("Test ingestion saved | country=%s path=%s", country, paths["test"])
+            write_text(paths["test"], json.dumps(notices, ensure_ascii=False, indent=2), storage_mode)
+            result.record_written(paths["test"])
+            logger.info("Test ingestion saved | country=%s path=%s", country, paths["test"])
 
-        # Summary at INFO; full record only at DEBUG (it's a sizeable blob)
-        first = notices[0]
-        logger.info(
-            "Sample notice | country=%s publication_number=%s notice_type=%s publication_date=%s",
-            country, first.get("publication-number"), first.get("notice-type"),
-            first.get("publication-date"),
-        )
-        logger.debug("Full sample notice: %s", json.dumps(first, ensure_ascii=False))
+            # Summary at INFO; full record only at DEBUG (it's a sizeable blob)
+            first = notices[0]
+            logger.info(
+                "Sample notice | country=%s publication_number=%s notice_type=%s publication_date=%s",
+                country, first.get("publication-number"), first.get("notice-type"),
+                first.get("publication-date"),
+            )
+            logger.debug("Full sample notice: %s", json.dumps(first, ensure_ascii=False))
+        except Exception:
+            logger.exception("Test ingestion failed | country=%s", country)
+            result.record_failed(paths["test"])
+
+    return result.finalize(attempted=len(countries))
 
 
-def run_historical(countries: list[str], storage_mode: str, from_date: str = None, to_date: str = None):
-    """Full pagination via ITERATION mode per country, saved batch-by-batch as JSONL."""
+def run_historical(countries: list[str], storage_mode: str, from_date: str = None, to_date: str = None) -> StageResult:
+    """Full pagination via ITERATION mode per country, saved batch-by-batch
+    as JSONL. A country's failure is isolated (logged + recorded in
+    failed_paths, state.json left untouched for that country) and doesn't
+    stop the rest of the batch — matches the per-country isolation the
+    module docstring already promises for storage/dedup/cursor state."""
     logger.info("Starting TED ingestion | mode=historical countries=%s from_date=%s to_date=%s storage_mode=%s",
                 countries, from_date, to_date, storage_mode)
 
+    result = StageResult()
     for country in countries:
-        iso3 = iso2_to_iso3(country)
         paths = country_paths(country)
-        start_time = time.monotonic()
-
-        total_received = 0
-        total_new = 0
-        total_dup = 0
-        batch_count = 0
-
         try:
+            iso3 = iso2_to_iso3(country)
+            start_time = time.monotonic()
+
+            total_received = 0
+            total_new = 0
+            total_dup = 0
+            batch_count = 0
+
             query = build_query(iso3, from_date=from_date, to_date=to_date, sort=True)
             logger.debug("Historical query | country=%s: %s", country, query)
 
@@ -468,68 +484,79 @@ def run_historical(countries: list[str], storage_mode: str, from_date: str = Non
                     "Batch saved | country=%s batch=%s new=%s duplicates=%s running_total=%s",
                     country, batch_count, new_count, dup_count, len(seen),
                 )
-        except Exception:
-            logger.exception("Historical ingestion failed | country=%s — state.json will NOT be updated", country)
-            raise
 
-        elapsed = time.monotonic() - start_time
+            elapsed = time.monotonic() - start_time
 
-        logger.info("Historical ingestion finished | country=%s", country)
-        logger.info(
-            "Historical ingestion summary | country=%s requests=%s received=%s "
-            "unique_on_disk=%s duplicates=%s new_saved=%s elapsed=%.1fs output_path=%s",
-            country, batch_count, total_received, len(seen), total_dup, total_new,
-            elapsed, paths["dataset"],
-        )
+            logger.info("Historical ingestion finished | country=%s", country)
+            logger.info(
+                "Historical ingestion summary | country=%s requests=%s received=%s "
+                "unique_on_disk=%s duplicates=%s new_saved=%s elapsed=%.1fs output_path=%s",
+                country, batch_count, total_received, len(seen), total_dup, total_new,
+                elapsed, paths["dataset"],
+            )
 
-        # Only a bounded range (explicit to_date) represents a fully-covered
-        # period we can safely record as "successfully loaded through". An
-        # open-ended historical load (no to_date) has no such endpoint, so we
-        # deliberately don't touch state.json in that case.
-        if to_date:
-            updated = update_state_if_newer(paths["state"], to_date, storage_mode)
-            if updated:
-                logger.info(
-                    "Historical load completed successfully. State updated | "
-                    "country=%s last_successful_date=%s", country, to_date,
-                )
+            # Only a bounded range (explicit to_date) represents a fully-covered
+            # period we can safely record as "successfully loaded through". An
+            # open-ended historical load (no to_date) has no such endpoint, so we
+            # deliberately don't touch state.json in that case.
+            if to_date:
+                updated = update_state_if_newer(paths["state"], to_date, storage_mode)
+                if updated:
+                    logger.info(
+                        "Historical load completed successfully. State updated | "
+                        "country=%s last_successful_date=%s", country, to_date,
+                    )
+                else:
+                    logger.info(
+                        "Historical load completed successfully. State left "
+                        "unchanged | country=%s (see reason above).", country,
+                    )
             else:
                 logger.info(
-                    "Historical load completed successfully. State left "
-                    "unchanged | country=%s (see reason above).", country,
+                    "Historical load completed successfully. No --to-date given — "
+                    "state.json left unchanged | country=%s", country,
                 )
-        else:
-            logger.info(
-                "Historical load completed successfully. No --to-date given — "
-                "state.json left unchanged | country=%s", country,
-            )
+
+            if total_new > 0:
+                result.record_written(paths["dataset"])
+            else:
+                result.record_unchanged(paths["dataset"])
+        except Exception:
+            logger.exception("Historical ingestion failed | country=%s — state.json will NOT be updated", country)
+            result.record_failed(paths["dataset"])
+
+    return result.finalize(attempted=len(countries))
 
 
-def run_refresh(countries: list[str], storage_mode: str):
-    """Loads notices since last successful run per country; updates each country's state.json only on success."""
+def run_refresh(countries: list[str], storage_mode: str) -> StageResult:
+    """Loads notices since last successful run per country; updates each
+    country's state.json only on success. A country's failure is isolated
+    (logged + recorded in failed_paths, state.json left untouched for
+    that country) and doesn't stop the rest of the batch."""
     logger.info("Starting TED ingestion | mode=refresh countries=%s storage_mode=%s", countries, storage_mode)
 
+    result = StageResult()
     for country in countries:
-        iso3 = iso2_to_iso3(country)
         paths = country_paths(country)
-        state = load_state(paths["state"], storage_mode)
-        since_date = state.get("last_successful_run_date")
-
-        if since_date:
-            logger.info("Starting refresh load | country=%s from=%s", country, since_date)
-        else:
-            logger.warning(
-                "No prior state found | country=%s — this will fetch everything matching "
-                "the filters (first run)", country,
-            )
-
-        total_received = 0
-        total_new = 0
-        total_dup = 0
-        batch_count = 0
-        start_time = time.monotonic()
-
         try:
+            iso3 = iso2_to_iso3(country)
+            state = load_state(paths["state"], storage_mode)
+            since_date = state.get("last_successful_run_date")
+
+            if since_date:
+                logger.info("Starting refresh load | country=%s from=%s", country, since_date)
+            else:
+                logger.warning(
+                    "No prior state found | country=%s — this will fetch everything matching "
+                    "the filters (first run)", country,
+                )
+
+            total_received = 0
+            total_new = 0
+            total_dup = 0
+            batch_count = 0
+            start_time = time.monotonic()
+
             query = build_query(iso3, since_date=since_date, sort=True)
             logger.debug("Refresh query | country=%s: %s", country, query)
 
@@ -546,29 +573,36 @@ def run_refresh(countries: list[str], storage_mode: str):
                     "Batch saved | country=%s batch=%s new=%s duplicates=%s",
                     country, batch_count, new_count, dup_count,
                 )
+
+            elapsed = time.monotonic() - start_time
+
+            logger.info("Refresh ingestion finished | country=%s", country)
+            logger.info(
+                "Refresh ingestion summary | country=%s requests=%s received=%s "
+                "new_saved=%s duplicates=%s elapsed=%.1fs",
+                country, batch_count, total_received, total_new, total_dup, elapsed,
+            )
+
+            # Only update state after full success
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            updated = update_state_if_newer(paths["state"], today, storage_mode)
+            if updated:
+                logger.info(
+                    "Refresh load completed successfully. State updated | "
+                    "country=%s last_successful_date=%s", country, today,
+                )
+            else:
+                logger.info("Refresh load completed successfully. State left unchanged | country=%s", country)
+
+            if total_new > 0:
+                result.record_written(paths["dataset"])
+            else:
+                result.record_unchanged(paths["dataset"])
         except Exception:
             logger.exception("Refresh ingestion failed | country=%s — state.json will NOT be updated", country)
-            raise  # do not update state on failure
+            result.record_failed(paths["dataset"])
 
-        elapsed = time.monotonic() - start_time
-
-        logger.info("Refresh ingestion finished | country=%s", country)
-        logger.info(
-            "Refresh ingestion summary | country=%s requests=%s received=%s "
-            "new_saved=%s duplicates=%s elapsed=%.1fs",
-            country, batch_count, total_received, total_new, total_dup, elapsed,
-        )
-
-        # Only update state after full success
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        updated = update_state_if_newer(paths["state"], today, storage_mode)
-        if updated:
-            logger.info(
-                "Refresh load completed successfully. State updated | "
-                "country=%s last_successful_date=%s", country, today,
-            )
-        else:
-            logger.info("Refresh load completed successfully. State left unchanged | country=%s", country)
+    return result.finalize(attempted=len(countries))
 
 
 # --------------------------------------------------------------------------
@@ -576,22 +610,25 @@ def run_refresh(countries: list[str], storage_mode: str):
 # --------------------------------------------------------------------------
 
 def run(mode: str, storage_mode: str = "local", countries: list[str] | None = None,
-        from_date: str | None = None, to_date: str | None = None):
+        from_date: str | None = None, to_date: str | None = None) -> StageResult:
     """
     Called from root main.py:
 
         from ingestion.ted.notices import run as run_ted_ingestion
-        run_ted_ingestion(mode="test")
+        result = run_ted_ingestion(mode="test")
 
-    CLI argument parsing lives in main.py, not here.
+    CLI argument parsing lives in main.py, not here. Returns a
+    common.manifest.StageResult — pass written_paths straight into
+    normalization/transformation to process only the countries whose
+    dataset actually changed.
     """
     countries = countries or DEFAULT_COUNTRIES
     if mode == "test":
-        run_test(countries, storage_mode)
+        return run_test(countries, storage_mode)
     elif mode == "historical":
-        run_historical(countries, storage_mode, from_date=from_date, to_date=to_date)
+        return run_historical(countries, storage_mode, from_date=from_date, to_date=to_date)
     elif mode == "refresh":
-        run_refresh(countries, storage_mode)
+        return run_refresh(countries, storage_mode)
     else:
         raise ValueError(
             f"Unknown mode {mode!r} — expected 'test', 'historical', or 'refresh'"

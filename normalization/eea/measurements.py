@@ -53,6 +53,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from common.manifest import StageResult
 from common.storage import list_files, read_bytes, resolve_paths, write_bytes
 
 logger = logging.getLogger(__name__)
@@ -173,14 +174,16 @@ def discover_countries(storage_mode: str) -> list[str]:
     return sorted({path[len(RAW_BASE_DIR):].lstrip("/").split("/")[0] for path in raw_files})
 
 
-def run(storage_mode: str = "local", countries: list[str] | None = None):
+def run(storage_mode: str = "local", countries: list[str] | None = None) -> StageResult:
     """
     Normalizes every raw measurements Parquet file found under each of
     `countries` (relative paths under data/raw/eea/measurements/, e.g.
     "DE" or "DE/2025/PM10") — one output file per input file, same
     layout, under data/normalized/eea/measurements/. `countries` is
     required; pass discover_countries(storage_mode) to process
-    everything currently ingested.
+    everything currently ingested. A failed file is isolated (logged +
+    recorded in failed_paths) and doesn't stop the rest of the batch. An
+    empty raw_files match is not an error — returns a SKIPPED StageResult.
     """
     if not countries:
         raise ValueError(
@@ -193,13 +196,23 @@ def run(storage_mode: str = "local", countries: list[str] | None = None):
 
     if not raw_files:
         logger.warning("No raw measurements files found for countries=%s under %s", countries, RAW_BASE_DIR)
-        return
+        return StageResult().finalize(attempted=0)
 
     logger.info("Starting EEA measurements normalization | countries=%s files=%s storage_mode=%s",
                 countries, len(raw_files), storage_mode)
+
+    result = StageResult()
     for raw_path in raw_files:
-        normalize_file(raw_path, storage_mode)
-    logger.info("EEA measurements normalization finished | files=%s", len(raw_files))
+        try:
+            out_path = normalize_file(raw_path, storage_mode)
+            result.record_written(out_path)
+        except Exception:
+            logger.exception("Measurements normalization failed | raw=%s", raw_path)
+            result.record_failed(raw_path)
+
+    logger.info("EEA measurements normalization finished | files=%s written=%s failed=%s",
+                len(raw_files), len(result.written_paths), len(result.failed_paths))
+    return result.finalize(attempted=len(raw_files))
 
 
 if __name__ == "__main__":

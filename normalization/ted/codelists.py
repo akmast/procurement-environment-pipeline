@@ -44,6 +44,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from common.manifest import StageResult
 from common.storage import exists, list_files, read_bytes, write_bytes
 
 logger = logging.getLogger(__name__)
@@ -89,7 +90,7 @@ def discover_codelist_ids(storage_mode: str) -> list[str]:
     return sorted(path.rsplit("/", 1)[-1].removesuffix(".gc.xml") for path in xml_files)
 
 
-def run(storage_mode: str = "local", codelist_ids: list[str] | None = None):
+def run(storage_mode: str = "local", codelist_ids: list[str] | None = None) -> StageResult:
     if not codelist_ids:
         raise ValueError(
             "codelist_ids must be provided explicitly — e.g. codelist_ids=['country'], or "
@@ -100,33 +101,40 @@ def run(storage_mode: str = "local", codelist_ids: list[str] | None = None):
     logger.info("Starting TED codelists normalization | codelist_ids=%s storage_mode=%s",
                 codelist_ids, storage_mode)
 
-    results = {}
+    result = StageResult()
     for codelist_id in codelist_ids:
         xml_path = f"{RAW_DIR}/{codelist_id}.gc.xml"
-        if not exists(xml_path, storage_mode):
-            logger.warning("Raw codelist not found, skipped | codelist=%s path=%s", codelist_id, xml_path)
-            continue
-
-        rows = parse_genericode(read_bytes(xml_path, storage_mode))
-        if not rows:
-            logger.warning(
-                "Codelist parsed 0 rows | codelist=%s — XML structure may not "
-                "match expected Genericode format", codelist_id,
-            )
-            continue
-
-        df = pd.DataFrame(rows)
         out_path = f"{OUT_DIR}/{codelist_id}.parquet"
-        buffer = BytesIO()
-        df.to_parquet(buffer, index=False)
-        write_bytes(out_path, buffer.getvalue(), storage_mode)
+        try:
+            if not exists(xml_path, storage_mode):
+                logger.error("Raw codelist not found, skipped | codelist=%s path=%s", codelist_id, xml_path)
+                result.record_failed(xml_path)
+                continue
 
-        logger.info("Codelist normalized | codelist=%s rows=%s columns=%s path=%s",
-                    codelist_id, len(df), list(df.columns), out_path)
-        results[codelist_id] = out_path
+            rows = parse_genericode(read_bytes(xml_path, storage_mode))
+            if not rows:
+                logger.error(
+                    "Codelist parsed 0 rows | codelist=%s — XML structure may not "
+                    "match expected Genericode format", codelist_id,
+                )
+                result.record_failed(xml_path)
+                continue
 
-    logger.info("Codelist normalization finished | saved=%s", len(results))
-    return results
+            df = pd.DataFrame(rows)
+            buffer = BytesIO()
+            df.to_parquet(buffer, index=False)
+            write_bytes(out_path, buffer.getvalue(), storage_mode)
+            result.record_written(out_path)
+
+            logger.info("Codelist normalized | codelist=%s rows=%s columns=%s path=%s",
+                        codelist_id, len(df), list(df.columns), out_path)
+        except Exception:
+            logger.exception("Codelist normalization failed | codelist=%s", codelist_id)
+            result.record_failed(xml_path)
+
+    logger.info("Codelist normalization finished | total=%s written=%s failed=%s",
+                len(codelist_ids), len(result.written_paths), len(result.failed_paths))
+    return result.finalize(attempted=len(codelist_ids))
 
 
 if __name__ == "__main__":

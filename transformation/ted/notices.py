@@ -53,6 +53,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from common.manifest import StageResult
 from common.storage import exists, list_files, read_bytes, write_bytes
 
 logger = logging.getLogger(__name__)
@@ -153,7 +154,7 @@ def add_codelist_labels(df: pd.DataFrame, lookups: dict[str, dict]) -> pd.DataFr
     return df
 
 
-def run(storage_mode: str = "local", countries: list[str] | None = None):
+def run(storage_mode: str = "local", countries: list[str] | None = None) -> StageResult:
     if not countries:
         raise ValueError(
             "countries must be provided explicitly — e.g. countries=['DE'], or "
@@ -167,25 +168,33 @@ def run(storage_mode: str = "local", countries: list[str] | None = None):
     # and reused for every country's notices below.
     lookups = load_codelist_lookups(storage_mode)
 
+    result = StageResult()
     for country in countries:
         normalized_path = f"{NORMALIZED_BASE_DIR}/{country}/{NOTICES_FILENAME}"
-        if not exists(normalized_path, storage_mode):
-            raise FileNotFoundError(
-                f"No normalized notices file at {normalized_path} — "
-                f"run normalization.ted.notices first."
-            )
-
-        df = pd.read_parquet(BytesIO(read_bytes(normalized_path, storage_mode)))
-        df = deduplicate_notices(df)
-        df = add_codelist_labels(df, lookups)
-
         out_path = f"{TRANSFORMED_BASE_DIR}/{country}/{NOTICES_FILENAME}"
-        buffer = BytesIO()
-        df.to_parquet(buffer, index=False)
-        write_bytes(out_path, buffer.getvalue(), storage_mode)
+        try:
+            if not exists(normalized_path, storage_mode):
+                raise FileNotFoundError(
+                    f"No normalized notices file at {normalized_path} — "
+                    f"run normalization.ted.notices first."
+                )
 
-        logger.info("Transformed notices saved | country=%s path=%s rows=%s",
-                    country, out_path, len(df))
+            df = pd.read_parquet(BytesIO(read_bytes(normalized_path, storage_mode)))
+            df = deduplicate_notices(df)
+            df = add_codelist_labels(df, lookups)
+
+            buffer = BytesIO()
+            df.to_parquet(buffer, index=False)
+            write_bytes(out_path, buffer.getvalue(), storage_mode)
+            result.record_written(out_path)
+
+            logger.info("Transformed notices saved | country=%s path=%s rows=%s",
+                        country, out_path, len(df))
+        except Exception:
+            logger.exception("Notices transformation failed | country=%s", country)
+            result.record_failed(normalized_path)
+
+    return result.finalize(attempted=len(countries))
 
 
 if __name__ == "__main__":

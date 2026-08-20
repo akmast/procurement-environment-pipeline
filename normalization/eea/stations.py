@@ -40,6 +40,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from common.manifest import StageResult
 from common.storage import list_files, read_bytes, write_bytes
 
 logger = logging.getLogger(__name__)
@@ -84,7 +85,7 @@ def drop_popup_info(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def run(storage_mode: str = "local", countries: list[str] | None = None):
+def run(storage_mode: str = "local", countries: list[str] | None = None) -> StageResult:
     if not countries:
         raise ValueError(
             "countries must be provided explicitly — e.g. countries=['DE'], or "
@@ -95,21 +96,29 @@ def run(storage_mode: str = "local", countries: list[str] | None = None):
     logger.info("Starting EEA station metadata normalization | countries=%s storage_mode=%s",
                 countries, storage_mode)
 
+    result = StageResult()
     for country in countries:
-        features = load_raw_features(country, storage_mode)
-        df = flatten_features(features)
-        df = drop_popup_info(df)
-
         out_path = f"{NORMALIZED_BASE_DIR}/{country}/station_metadata.parquet"
-        buffer = BytesIO()
-        df.to_parquet(buffer, index=False)
-        write_bytes(out_path, buffer.getvalue(), storage_mode)
+        try:
+            features = load_raw_features(country, storage_mode)
+            df = flatten_features(features)
+            df = drop_popup_info(df)
 
-        logger.info("Normalized stations saved | country=%s path=%s rows=%s",
-                    country, out_path, len(df))
-        logger.info("Columns | %s", list(df.columns))
-        if not df.empty:
-            logger.info("Sample rows:\n%s", df.head(3).to_string())
+            buffer = BytesIO()
+            df.to_parquet(buffer, index=False)
+            write_bytes(out_path, buffer.getvalue(), storage_mode)
+            result.record_written(out_path)
+
+            logger.info("Normalized stations saved | country=%s path=%s rows=%s",
+                        country, out_path, len(df))
+            logger.info("Columns | %s", list(df.columns))
+            if not df.empty:
+                logger.info("Sample rows:\n%s", df.head(3).to_string())
+        except Exception:
+            logger.exception("Station normalization failed | country=%s", country)
+            result.record_failed(out_path)
+
+    return result.finalize(attempted=len(countries))
 
 
 if __name__ == "__main__":

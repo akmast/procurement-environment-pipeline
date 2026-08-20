@@ -57,6 +57,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from common.manifest import StageResult
 from common.storage import exists, list_files, read_bytes, resolve_paths, write_bytes
 
 logger = logging.getLogger(__name__)
@@ -161,13 +162,16 @@ def discover_countries(storage_mode: str) -> list[str]:
     return sorted({extract_country_from_path(path) for path in normalized_files})
 
 
-def run(storage_mode: str = "local", countries: list[str] | None = None):
+def run(storage_mode: str = "local", countries: list[str] | None = None) -> StageResult:
     """
     Transforms every normalized measurements Parquet file found under
     each of `countries` — one output file per input file, same layout,
     under data/transformed/eea/measurements/. `countries` is required;
     pass discover_countries(storage_mode) to process everything
-    currently normalized.
+    currently normalized. A failed file is isolated (logged + recorded
+    in failed_paths) and doesn't stop the rest of the batch — once a
+    country's station lookup fails, the remaining files for that same
+    country are recorded as failed too, without re-attempting the lookup.
     """
     if not countries:
         raise ValueError(
@@ -184,16 +188,28 @@ def run(storage_mode: str = "local", countries: list[str] | None = None):
     if not normalized_files:
         logger.warning("No normalized measurements files found for countries=%s under %s",
                        countries, NORMALIZED_BASE_DIR)
-        return
+        return StageResult().finalize(attempted=0)
 
+    result = StageResult()
     stations_cache: dict[str, pd.DataFrame] = {}
+    failed_countries: set[str] = set()
     for normalized_path in normalized_files:
         country = extract_country_from_path(normalized_path)
-        if country not in stations_cache:
-            stations_cache[country] = load_stations(country, storage_mode)
-        transform_file(normalized_path, stations_cache[country], storage_mode)
+        try:
+            if country in failed_countries:
+                raise RuntimeError(f"Skipped — stations lookup for country={country} already failed this run")
+            if country not in stations_cache:
+                stations_cache[country] = load_stations(country, storage_mode)
+            out_path = transform_file(normalized_path, stations_cache[country], storage_mode)
+            result.record_written(out_path)
+        except Exception:
+            logger.exception("Measurements transformation failed | normalized=%s", normalized_path)
+            result.record_failed(normalized_path)
+            failed_countries.add(country)
 
-    logger.info("EEA measurements transformation finished | files=%s", len(normalized_files))
+    logger.info("EEA measurements transformation finished | files=%s written=%s failed=%s",
+                len(normalized_files), len(result.written_paths), len(result.failed_paths))
+    return result.finalize(attempted=len(normalized_files))
 
 
 if __name__ == "__main__":

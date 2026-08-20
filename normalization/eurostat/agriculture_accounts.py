@@ -71,6 +71,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from common.manifest import StageResult
 from common.storage import list_files, read_bytes, resolve_paths, write_bytes
 
 logger = logging.getLogger(__name__)
@@ -219,7 +220,7 @@ def normalize_file(raw_path: str, storage_mode: str) -> str:
     return out_path
 
 
-def run(storage_mode: str = "local", countries: list[str] | None = None):
+def run(storage_mode: str = "local", countries: list[str] | None = None) -> StageResult:
     if not countries:
         raise ValueError(
             "countries must be provided explicitly — e.g. countries=['DE'], or "
@@ -233,13 +234,23 @@ def run(storage_mode: str = "local", countries: list[str] | None = None):
     if not raw_files:
         logger.warning("No raw agricultural accounts files found for countries=%s under %s",
                        countries, RAW_BASE_DIR)
-        return
+        return StageResult().finalize(attempted=0)
 
     logger.info("Starting Eurostat agricultural accounts normalization | countries=%s files=%s storage_mode=%s",
                 countries, len(raw_files), storage_mode)
+
+    result = StageResult()
     for raw_path in raw_files:
-        normalize_file(raw_path, storage_mode)
-    logger.info("Eurostat agricultural accounts normalization finished | files=%s", len(raw_files))
+        try:
+            out_path = normalize_file(raw_path, storage_mode)
+            result.record_written(out_path)
+        except Exception:
+            logger.exception("Agricultural accounts normalization failed | raw=%s", raw_path)
+            result.record_failed(raw_path)
+
+    logger.info("Eurostat agricultural accounts normalization finished | files=%s written=%s failed=%s",
+                len(raw_files), len(result.written_paths), len(result.failed_paths))
+    return result.finalize(attempted=len(raw_files))
 
 
 if __name__ == "__main__":

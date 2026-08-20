@@ -74,6 +74,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from common.manifest import StageResult
 from common.storage import exists, list_files, read_text, write_bytes
 
 logger = logging.getLogger(__name__)
@@ -270,7 +271,7 @@ def flatten_notice(notice: dict, country: str) -> dict:
     }
 
 
-def run(storage_mode: str = "local", countries: list[str] | None = None):
+def run(storage_mode: str = "local", countries: list[str] | None = None) -> StageResult:
     if not countries:
         raise ValueError(
             "countries must be provided explicitly — e.g. countries=['DE'], or "
@@ -280,33 +281,42 @@ def run(storage_mode: str = "local", countries: list[str] | None = None):
 
     logger.info("Starting TED notices normalization | countries=%s storage_mode=%s", countries, storage_mode)
 
+    result = StageResult()
     for country in countries:
         raw_path = f"{RAW_BASE_DIR}/{country}/{NOTICES_RAW_FILENAME}"
         normalized_path = f"{NORMALIZED_BASE_DIR}/{country}/{NOTICES_NORMALIZED_FILENAME}"
 
-        if not exists(raw_path, storage_mode):
-            raise FileNotFoundError(
-                f"No raw notices file at {raw_path} — run ingestion.ted.notices first."
-            )
+        try:
+            if not exists(raw_path, storage_mode):
+                raise FileNotFoundError(
+                    f"No raw notices file at {raw_path} — run ingestion.ted.notices first."
+                )
 
-        rows = []
-        for line in read_text(raw_path, storage_mode).splitlines():
-            line = line.strip()
-            if not line:
+            rows = []
+            for line in read_text(raw_path, storage_mode).splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                rows.append(flatten_notice(json.loads(line), country))
+
+            if not rows:
+                logger.warning("No notices found in %s — nothing written for country=%s", raw_path, country)
+                result.record_unchanged(raw_path)
                 continue
-            rows.append(flatten_notice(json.loads(line), country))
 
-        if not rows:
-            logger.warning("No notices found in %s — nothing written for country=%s", raw_path, country)
-            continue
+            df = pd.DataFrame(rows)
+            buffer = BytesIO()
+            df.to_parquet(buffer, index=False)
+            write_bytes(normalized_path, buffer.getvalue(), storage_mode)
+            result.record_written(normalized_path)
 
-        df = pd.DataFrame(rows)
-        buffer = BytesIO()
-        df.to_parquet(buffer, index=False)
-        write_bytes(normalized_path, buffer.getvalue(), storage_mode)
+            logger.info("TED notices normalization finished | country=%s rows=%s path=%s",
+                        country, len(df), normalized_path)
+        except Exception:
+            logger.exception("TED notices normalization failed | country=%s", country)
+            result.record_failed(raw_path)
 
-        logger.info("TED notices normalization finished | country=%s rows=%s path=%s",
-                    country, len(df), normalized_path)
+    return result.finalize(attempted=len(countries))
 
 
 if __name__ == "__main__":

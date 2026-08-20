@@ -45,7 +45,8 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from common.logging_config import setup_logging
 from common.change_tracking import load_state, save_state
-from common.staged_write import stage_validate_and_write
+from common.manifest import StageResult
+from common.staged_write import WRITE_RESULT_WRITTEN, stage_validate_and_write
 from common.validation import is_valid_geojson
 
 setup_logging()
@@ -82,32 +83,39 @@ def fetch_nuts_boundaries() -> bytes | None:
     return resp.content
 
 
-def run(storage_mode: str = "local"):
+def run(storage_mode: str = "local") -> StageResult:
     """
     Entry point to be imported and called from main.py, e.g.:
 
         from ingestion.eea.nuts_boundaries import run
-        run()
+        result = run()
     """
     logger.info("Starting NUTS boundaries ingestion | storage_mode=%s", storage_mode)
     state = load_state(STATE_PATH, storage_mode)
+    result = StageResult()
 
     geojson_bytes = fetch_nuts_boundaries()
     if geojson_bytes is None:
         logger.warning("NUTS boundaries ingestion finished | no file written — download failed")
-        return None
+        result.record_failed(OUT_PATH)
+        return result.finalize(attempted=1)
 
-    is_written = stage_validate_and_write(
+    write_result = stage_validate_and_write(
         OUT_PATH, geojson_bytes, storage_mode, state, validate=is_valid_geojson
     )
     save_state(STATE_PATH, state, storage_mode)
 
-    if is_written:
+    if write_result == WRITE_RESULT_WRITTEN:
+        result.record_written(OUT_PATH)
         logger.info("NUTS boundaries saved | size_bytes=%s path=%s", len(geojson_bytes), OUT_PATH)
+    elif write_result == "unchanged":
+        result.record_unchanged(OUT_PATH)
+        logger.info("NUTS boundaries not written (unchanged) | path=%s", OUT_PATH)
     else:
-        logger.info("NUTS boundaries not written (unchanged or invalid) | path=%s", OUT_PATH)
+        result.record_failed(OUT_PATH)
+        logger.error("NUTS boundaries not written (invalid) | path=%s", OUT_PATH)
 
-    return OUT_PATH
+    return result.finalize(attempted=1)
 
 
 if __name__ == "__main__":

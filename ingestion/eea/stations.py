@@ -39,7 +39,8 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from common.logging_config import setup_logging
 from common.change_tracking import load_state, save_state
-from common.staged_write import stage_validate_and_write
+from common.manifest import StageResult
+from common.staged_write import WRITE_RESULT_WRITTEN, stage_validate_and_write
 from common.validation import is_valid_json
 
 try:
@@ -104,35 +105,46 @@ def fetch_raw_features(country: str) -> list[dict]:
     return all_features
 
 
-def run_stations(countries: list[str], storage_mode: str):
+def run_stations(countries: list[str], storage_mode: str) -> StageResult:
     logger.info("Starting EEA station metadata ingestion | mode=stations countries=%s storage_mode=%s",
                 countries, storage_mode)
 
+    result = StageResult()
     for country in countries:
-        features = fetch_raw_features(country)
-        content = json.dumps(features, ensure_ascii=False).encode("utf-8")
-
         raw_path = f"{OUT_DIR}/{country}/stations_raw.json"
         state_path = f"{OUT_DIR}/{country}/state.json"
-        state = load_state(state_path, storage_mode)
 
-        written = stage_validate_and_write(
-            raw_path, content, storage_mode, state, validate=is_valid_json
-        )
+        try:
+            features = fetch_raw_features(country)
+            content = json.dumps(features, ensure_ascii=False).encode("utf-8")
 
-        if not written:
-            logger.info("No update written | country=%s features=%s", country, len(features))
-            continue
+            state = load_state(state_path, storage_mode)
+            write_result = stage_validate_and_write(
+                raw_path, content, storage_mode, state, validate=is_valid_json
+            )
 
-        save_state(state_path, state, storage_mode)
-        logger.info("Raw stations saved | country=%s path=%s features=%s storage_mode=%s",
-                    country, raw_path, len(features), storage_mode)
+            if write_result == WRITE_RESULT_WRITTEN:
+                save_state(state_path, state, storage_mode)
+                result.record_written(raw_path)
+                logger.info("Raw stations saved | country=%s path=%s features=%s storage_mode=%s",
+                            country, raw_path, len(features), storage_mode)
+            elif write_result == "unchanged":
+                result.record_unchanged(raw_path)
+                logger.info("No update written | country=%s features=%s", country, len(features))
+            else:
+                result.record_failed(raw_path)
+                logger.error("Raw stations not written (invalid) | country=%s path=%s", country, raw_path)
+        except Exception:
+            logger.exception("Station ingestion failed | country=%s", country)
+            result.record_failed(raw_path)
+
+    return result.finalize(attempted=len(countries))
 
 
-def run(mode: str, storage_mode: str = "local", countries: list[str] | None = None, **kwargs):
+def run(mode: str, storage_mode: str = "local", countries: list[str] | None = None, **kwargs) -> StageResult:
     countries = countries or DEFAULT_COUNTRIES
     if mode == "stations":
-        run_stations(countries, storage_mode)
+        return run_stations(countries, storage_mode)
     else:
         raise ValueError(f"Unknown mode {mode!r} — expected 'stations'")
 

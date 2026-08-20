@@ -54,7 +54,8 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from common.logging_config import setup_logging
 from common.change_tracking import load_state, save_state
-from common.staged_write import stage_validate_and_write
+from common.manifest import StageResult
+from common.staged_write import WRITE_RESULT_UNCHANGED, WRITE_RESULT_WRITTEN, stage_validate_and_write
 from common.storage import write_bytes
 from common.validation import is_valid_json_stat
 
@@ -264,12 +265,16 @@ def fetch_country_year(country: str, year: int) -> tuple[bytes, dict, int]:
     return content, payload, len(geo_codes)
 
 
-def _save_country_year(country: str, year: int, state: dict, storage_mode: str) -> dict:
+def _save_country_year(country: str, year: int, state: dict, storage_mode: str) -> tuple[str, str]:
+    """Returns (write_result, path). write_result is one of
+    WRITE_RESULT_WRITTEN / WRITE_RESULT_UNCHANGED / WRITE_RESULT_INVALID
+    (see common.staged_write). Raises on fetch/discovery failure — the
+    caller isolates that per year via try/except."""
     content, payload, region_count = fetch_country_year(country, year)
     path = output_path(country, year)
-    written = stage_validate_and_write(path, content, storage_mode, state, validate=is_valid_json_stat)
+    write_result = stage_validate_and_write(path, content, storage_mode, state, validate=is_valid_json_stat)
 
-    if written:
+    if write_result == WRITE_RESULT_WRITTEN:
         state[path].update({
             "dataset": DATASET_CODE,
             "source_updated": payload.get("updated"),
@@ -280,10 +285,12 @@ def _save_country_year(country: str, year: int, state: dict, storage_mode: str) 
         })
         logger.info("Agricultural accounts saved | country=%s year=%s regions=%s size_bytes=%s path=%s",
                     country, year, region_count, len(content), path)
-    else:
+    elif write_result == WRITE_RESULT_UNCHANGED:
         logger.info("Agricultural accounts unchanged | country=%s year=%s path=%s", country, year, path)
+    else:
+        logger.error("Agricultural accounts not written (invalid) | country=%s year=%s path=%s", country, year, path)
 
-    return {"year": year, "written": written, "path": path if written else None}
+    return write_result, path
 
 
 def tracked_years(state: dict, country: str) -> list[int]:
@@ -306,56 +313,84 @@ def tracked_years(state: dict, country: str) -> list[int]:
 # Modes
 # --------------------------------------------------------------------------
 
-def run_test(countries: list[str], storage_mode: str) -> dict:
+def run_test(countries: list[str], storage_mode: str) -> StageResult:
     """One output series, latest available year per country. Doesn't touch
-    real storage or state."""
+    real storage or state. A failed country is isolated (logged + recorded
+    in failed_paths) and doesn't stop the rest of the batch."""
     logger.info("Starting Eurostat agricultural accounts ingestion | mode=test countries=%s storage_mode=%s",
                 countries, storage_mode)
-    results = {}
+    result = StageResult()
     for country in countries:
-        latest_year = discover_latest_year(country)
-        geo_codes = discover_nuts2_codes(country, latest_year)
+        path = f"{TEST_DIR}/{country}"
+        try:
+            latest_year = discover_latest_year(country)
+            geo_codes = discover_nuts2_codes(country, latest_year)
 
-        params = [("lang", "EN"), ("time", str(latest_year))]
-        params.extend(DISCOVERY_FILTERS.items())
-        params.extend(("geo", code) for code in geo_codes)
-        content, payload = get_json_stat(params)
+            params = [("lang", "EN"), ("time", str(latest_year))]
+            params.extend(DISCOVERY_FILTERS.items())
+            params.extend(("geo", code) for code in geo_codes)
+            content, payload = get_json_stat(params)
 
-        observed_codes = codes_with_observations(payload, "geo")
-        if not observed_codes:
-            raise RuntimeError(f"Test response has no observations | country={country} year={latest_year}")
-        if not is_valid_json_stat(content):
-            raise RuntimeError(f"Test response failed JSON-stat validation | country={country}")
+            observed_codes = codes_with_observations(payload, "geo")
+            if not observed_codes:
+                raise RuntimeError(f"Test response has no observations | country={country} year={latest_year}")
+            if not is_valid_json_stat(content):
+                raise RuntimeError(f"Test response failed JSON-stat validation | country={country}")
 
-        path = f"{TEST_DIR}/{country}/{latest_year}/{DATASET_CODE}.json"
-        write_bytes(path, content, storage_mode)
-        logger.info("Test file saved | country=%s year=%s regions=%s path=%s",
-                    country, latest_year, len(observed_codes), path)
-        results[country] = {"year": latest_year, "path": path}
-    return results
+            path = f"{TEST_DIR}/{country}/{latest_year}/{DATASET_CODE}.json"
+            write_bytes(path, content, storage_mode)
+            result.record_written(path)
+            logger.info("Test file saved | country=%s year=%s regions=%s path=%s",
+                        country, latest_year, len(observed_codes), path)
+        except Exception:
+            logger.exception("Test ingestion failed | country=%s", country)
+            result.record_failed(path)
+
+    return result.finalize(attempted=len(countries))
 
 
-def run_historical(countries: list[str], from_year: int, to_year: int, storage_mode: str) -> dict:
+def run_historical(countries: list[str], from_year: int, to_year: int, storage_mode: str) -> StageResult:
+    """Returns a StageResult merged across every requested country and
+    year — written_paths is every file that changed this run, ready to
+    pass into normalization.eurostat.agriculture_accounts.run(countries=...)
+    (see docs/pipelines/countries.md). A failed year is isolated (logged +
+    recorded in failed_paths) and doesn't stop the rest of the batch."""
     validate_year_range(from_year, to_year)
     logger.info("Starting Eurostat agricultural accounts ingestion | mode=historical countries=%s "
                 "years=%s-%s storage_mode=%s", countries, from_year, to_year, storage_mode)
 
-    summary = {}
+    result = StageResult()
     for country in countries:
         state = load_state(country_state_path(country), storage_mode)
-        results = [_save_country_year(country, year, state, storage_mode)
-                   for year in range(from_year, to_year + 1)]
+        country_result = StageResult()
+        for year in range(from_year, to_year + 1):
+            path = output_path(country, year)
+            try:
+                write_result, path = _save_country_year(country, year, state, storage_mode)
+                if write_result == WRITE_RESULT_WRITTEN:
+                    country_result.record_written(path)
+                elif write_result == WRITE_RESULT_UNCHANGED:
+                    country_result.record_unchanged(path)
+                else:
+                    country_result.record_failed(path)
+            except Exception:
+                logger.exception("Agricultural accounts ingestion failed | country=%s year=%s", country, year)
+                country_result.record_failed(path)
         save_state(country_state_path(country), state, storage_mode)
 
-        written = [r for r in results if r["written"]]
-        logger.info("Historical ingestion finished | country=%s years=%s-%s checked=%s written=%s",
-                    country, from_year, to_year, len(results), len(written))
-        summary[country] = {"files": len(results), "written": len(written),
-                             "written_paths": [r["path"] for r in written]}
-    return summary
+        attempted = (len(country_result.written_paths) + len(country_result.unchanged_paths)
+                     + len(country_result.failed_paths))
+        country_result.finalize(attempted=attempted)
+        logger.info("Historical ingestion finished | country=%s years=%s-%s written=%s unchanged=%s failed=%s",
+                    country, from_year, to_year, len(country_result.written_paths),
+                    len(country_result.unchanged_paths), len(country_result.failed_paths))
+        result.merge(country_result)
+
+    attempted = len(result.written_paths) + len(result.unchanged_paths) + len(result.failed_paths)
+    return result.finalize(attempted=attempted)
 
 
-def run_refresh(countries: list[str], storage_mode: str, from_year: int | None = None) -> dict:
+def run_refresh(countries: list[str], storage_mode: str, from_year: int | None = None) -> StageResult:
     """
     Re-checks every year already tracked for the country, plus any newly
     published year, and only rewrites a file when its content hash
@@ -363,12 +398,14 @@ def run_refresh(countries: list[str], storage_mode: str, from_year: int | None =
     already-published observations — there's no append-only record stream
     or "created_at" cursor to follow, so this re-requests every tracked
     year rather than guessing which old year might have been revised
-    (DE/PL's yearly subsets are small enough that this is cheap).
+    (DE/PL's yearly subsets are small enough that this is cheap). A
+    failed year is isolated (logged + recorded in failed_paths) and
+    doesn't stop the rest of the batch.
     """
     logger.info("Starting Eurostat agricultural accounts ingestion | mode=refresh countries=%s "
                 "storage_mode=%s", countries, storage_mode)
 
-    summary = {}
+    result = StageResult()
     for country in countries:
         state = load_state(country_state_path(country), storage_mode)
         tracked = tracked_years(state, country)
@@ -385,22 +422,39 @@ def run_refresh(countries: list[str], storage_mode: str, from_year: int | None =
         logger.info("Refresh window resolved | country=%s tracked_years=%s latest_available=%s "
                     "refresh_years=%s", country, tracked, latest_year, years)
 
-        results = [_save_country_year(country, year, state, storage_mode) for year in years]
+        country_result = StageResult()
+        for year in years:
+            path = output_path(country, year)
+            try:
+                write_result, path = _save_country_year(country, year, state, storage_mode)
+                if write_result == WRITE_RESULT_WRITTEN:
+                    country_result.record_written(path)
+                elif write_result == WRITE_RESULT_UNCHANGED:
+                    country_result.record_unchanged(path)
+                else:
+                    country_result.record_failed(path)
+            except Exception:
+                logger.exception("Agricultural accounts refresh failed | country=%s year=%s", country, year)
+                country_result.record_failed(path)
         save_state(country_state_path(country), state, storage_mode)
 
-        written = [r for r in results if r["written"]]
-        logger.info("Refresh finished | country=%s checked=%s written=%s",
-                    country, len(results), len(written))
-        summary[country] = {"files": len(results), "written": len(written),
-                             "written_paths": [r["path"] for r in written]}
-    return summary
+        attempted = (len(country_result.written_paths) + len(country_result.unchanged_paths)
+                     + len(country_result.failed_paths))
+        country_result.finalize(attempted=attempted)
+        logger.info("Refresh finished | country=%s written=%s unchanged=%s failed=%s",
+                    country, len(country_result.written_paths),
+                    len(country_result.unchanged_paths), len(country_result.failed_paths))
+        result.merge(country_result)
+
+    attempted = len(result.written_paths) + len(result.unchanged_paths) + len(result.failed_paths)
+    return result.finalize(attempted=attempted)
 
 
 def run(mode: str, storage_mode: str = "local", countries: list[str] | None = None,
-        from_year: int | None = None, to_year: int | None = None):
+        from_year: int | None = None, to_year: int | None = None) -> StageResult:
     """
-    historical/refresh return {country: {"files", "written", "written_paths"}}
-    — written_paths is every file that changed this run, ready to pass into
+    Returns a common.manifest.StageResult — written_paths is every file
+    that changed this run, ready to pass into
     normalization.eurostat.agriculture_accounts.run(countries=...) so a
     refresh only reprocesses new/revised data (see docs/pipelines/countries.md).
     """

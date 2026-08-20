@@ -37,7 +37,8 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from common.logging_config import setup_logging
 from common.change_tracking import load_state, save_state
-from common.staged_write import stage_validate_and_write
+from common.manifest import StageResult
+from common.staged_write import WRITE_RESULT_WRITTEN, stage_validate_and_write
 from common.validation import is_valid_xml
 
 setup_logging()
@@ -86,46 +87,51 @@ def fetch_codelist_xml(codelist_id: str, filename: str) -> bytes | None:
     return resp.content
 
 
-def run(storage_mode: str = "local"):
+def run(storage_mode: str = "local") -> StageResult:
     """
     Entry point to be imported and called from main.py, e.g.:
 
         from ingestion.ted.codelists import run
-        run()
+        result = run()
+
+    A failed download/validation for one codelist is isolated (logged +
+    recorded in failed_paths) and doesn't stop the rest of the batch.
     """
     logger.info("Starting TED codelists ingestion | storage_mode=%s", storage_mode)
     state = load_state(STATE_PATH, storage_mode)
+    result = StageResult()
 
-    results = {}
-    written = 0
     for codelist_id, filename in CODELISTS.items():
-        xml_bytes = fetch_codelist_xml(codelist_id, filename)
-        if xml_bytes is None:
-            logger.warning("Codelist skipped | codelist=%s — download failed, no file written",
-                           codelist_id)
-            continue
-
         out_path = f"{OUT_DIR}/{codelist_id}.gc.xml"
-        is_written = stage_validate_and_write(
-            out_path, xml_bytes, storage_mode, state, validate=is_valid_xml
-        )
-        if not is_written:
-            logger.info("Codelist not written (unchanged or invalid) | codelist=%s", codelist_id)
-            results[codelist_id] = out_path
-            continue
+        try:
+            xml_bytes = fetch_codelist_xml(codelist_id, filename)
+            if xml_bytes is None:
+                logger.warning("Codelist not written | codelist=%s — download failed", codelist_id)
+                result.record_failed(out_path)
+                continue
 
-        written += 1
-        logger.info("Codelist saved | codelist=%s size_bytes=%s path=%s",
-                    codelist_id, len(xml_bytes), out_path)
-        results[codelist_id] = out_path
+            write_result = stage_validate_and_write(
+                out_path, xml_bytes, storage_mode, state, validate=is_valid_xml
+            )
+            if write_result == WRITE_RESULT_WRITTEN:
+                result.record_written(out_path)
+                logger.info("Codelist saved | codelist=%s size_bytes=%s path=%s",
+                            codelist_id, len(xml_bytes), out_path)
+            elif write_result == "unchanged":
+                result.record_unchanged(out_path)
+                logger.info("Codelist not written (unchanged) | codelist=%s", codelist_id)
+            else:
+                result.record_failed(out_path)
+                logger.error("Codelist not written (invalid) | codelist=%s", codelist_id)
+        except Exception:
+            logger.exception("Codelist ingestion failed | codelist=%s", codelist_id)
+            result.record_failed(out_path)
 
     save_state(STATE_PATH, state, storage_mode)
 
-    logger.info("Codelist ingestion finished | checked=%s/%s written=%s",
-                len(results), len(CODELISTS), written)
-    if not results:
-        logger.warning("No codelists were saved — see per-codelist errors above")
-    return results
+    logger.info("Codelist ingestion finished | total=%s written=%s unchanged=%s failed=%s",
+                len(CODELISTS), len(result.written_paths), len(result.unchanged_paths), len(result.failed_paths))
+    return result.finalize(attempted=len(CODELISTS))
 
 
 if __name__ == "__main__":
