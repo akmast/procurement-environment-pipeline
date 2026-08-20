@@ -1,5 +1,5 @@
 """
-Raw EEA measurements ingestion — test / historical / refresh_current.
+Raw EEA measurements ingestion — test / historical / refresh modes.
 
 One API request per pollutant, not one request covering all pollutants —
 this way we already know which pollutant a file belongs to from the
@@ -13,16 +13,29 @@ request payload accepts — no other filtering, no date filtering beyond
 the request window, no schema normalization, no dedup. All of that
 belongs to the normalization layer.
 
+Reads/writes go through common.storage (storage_mode="local" or "cloud",
+see common/storage.py) — the download/request logic never branches on
+storage_mode itself.
+
+`mode="refresh"` re-checks the "mutable" years (current year, and the
+previous year until its own reporting deadline — see
+common/reporting_window.py) and, per file, only rewrites storage when
+the downloaded bytes actually differ from what's already stored (see
+common/change_tracking.py) — years further in the past are not part of
+this project's incremental refresh at all; see
+docs/pipelines/eea_measurements.md for why.
+
     from ingestion.eea.measurements import run
     run(mode="test")
     run(mode="historical", from_year=2023, to_year=2025)
-    run(mode="refresh_current")
+    run(mode="refresh")
+    run(mode="refresh", storage_mode="cloud")
 """
 import json
 import logging
-import shutil
 import sys
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
@@ -34,6 +47,9 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from common.logging_config import setup_logging
+from common.change_tracking import has_changed, load_state, save_state
+from common.reporting_window import mutable_years
+from common.storage import append_text, write_bytes
 
 try:
     from .http_client import request_with_retry
@@ -46,10 +62,10 @@ logger = logging.getLogger(__name__)
 API_BASE = "https://eeadmz1-downloads-api-appservice.azurewebsites.net"
 URLS_ENDPOINT = f"{API_BASE}/ParquetFile/urls"
 
-OUT_DIR = Path("data/raw/eea/measurements")
-MANIFEST_PATH = OUT_DIR / "manifest.jsonl"
-TEST_DIR = Path("data/raw/eea/test")
-TEST_DIR.mkdir(parents=True, exist_ok=True)
+OUT_DIR = "data/raw/eea/measurements"
+MANIFEST_PATH = f"{OUT_DIR}/manifest.jsonl"
+STATE_PATH = f"{OUT_DIR}/state.json"
+TEST_DIR = "data/raw/eea/test"
 
 COUNTRY = "DE"  # server-side filter — the API's `countries` field accepts a list of codes
 POLLUTANTS = ["PM10", "PM2.5", "NO2", "O3", "SO2"]  # one request per entry, not one request for all
@@ -110,36 +126,28 @@ def download_file(url: str) -> bytes:
     return resp.content
 
 
-def append_manifest_entry(entry: dict):
-    with open(MANIFEST_PATH, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+def append_manifest_entry(entry: dict, storage_mode: str):
+    append_text(MANIFEST_PATH, json.dumps(entry, ensure_ascii=False) + "\n", storage_mode)
 
 
-def remove_manifest_entries_for_year(year: int):
-    if not MANIFEST_PATH.exists():
-        return
-    kept = []
-    with open(MANIFEST_PATH, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            entry = json.loads(line)
-            if entry.get("year") != year:
-                kept.append(entry)
-    with open(MANIFEST_PATH, "w", encoding="utf-8") as f:
-        for entry in kept:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-
-
-def _download_and_save(url: str, dest_dir: Path, i: int, total: int, year: int, pollutant: str):
+def _download_and_save(url: str, dest_dir: str, i: int, total: int, year: int,
+                        pollutant: str, state: dict, storage_mode: str) -> tuple[int, bool]:
+    """Returns (bytes_downloaded, was_written) — was_written is False when
+    the content hash matched what's already stored, so nothing was rewritten."""
     pct = int(i / total * 100)
     filename = Path(url).name or f"file_{i}.parquet"
-    logger.info("[%s/%s] %s%% — downloading %s (pollutant=%s)", i, total, pct, filename, pollutant)
+    dest_path = f"{dest_dir}/{filename}"
+    logger.info("[%s/%s] %s%% — checking %s (pollutant=%s)", i, total, pct, filename, pollutant)
 
     content = download_file(url)
-    local_path = dest_dir / filename
-    local_path.write_bytes(content)
+    changed, new_hash = has_changed(state, dest_path, content)
+
+    if not changed:
+        logger.info("Unchanged, skipped | %s", filename)
+        return len(content), False
+
+    write_bytes(dest_path, content, storage_mode)
+    state[dest_path] = {"content_hash": new_hash}
 
     append_manifest_entry({
         "url": url,
@@ -147,41 +155,49 @@ def _download_and_save(url: str, dest_dir: Path, i: int, total: int, year: int, 
         "pollutant": pollutant,
         "downloaded_at": datetime.now(timezone.utc).isoformat(),
         "size_bytes": len(content),
-        "local_path": str(local_path),
-    })
-    logger.info("Saved | %s (%.1f KB) -> %s", filename, len(content) / 1024, local_path)
-    return len(content)
+        "storage_path": dest_path,
+    }, storage_mode)
+    logger.info("Saved | %s (%.1f KB) -> %s", filename, len(content) / 1024, dest_path)
+    return len(content), True
 
 
-def download_pollutant_range(year: int, pollutant: str, from_date: str, to_date: str) -> int:
-    """Download every file for one pollutant within a date range. Returns file count."""
-    pollutant_dir = OUT_DIR / str(year) / pollutant
-    pollutant_dir.mkdir(parents=True, exist_ok=True)
+def download_pollutant_range(year: int, pollutant: str, from_date: str, to_date: str,
+                              state: dict, storage_mode: str) -> dict:
+    """Download every file for one pollutant within a date range, skipping
+    unchanged ones. Returns {"files": total, "written": changed_count}."""
+    pollutant_dir = f"{OUT_DIR}/{year}/{pollutant}"
 
     urls = get_file_urls(from_date, to_date, pollutant)
+    written = 0
     for i, url in enumerate(urls, start=1):
-        _download_and_save(url, pollutant_dir, i, len(urls), year, pollutant)
+        _, was_written = _download_and_save(
+            url, pollutant_dir, i, len(urls), year, pollutant, state, storage_mode
+        )
+        written += int(was_written)
 
-    logger.info("Pollutant finished | year=%s pollutant=%s files=%s", year, pollutant, len(urls))
-    return len(urls)
+    logger.info("Pollutant finished | year=%s pollutant=%s files=%s written=%s",
+                year, pollutant, len(urls), written)
+    return {"files": len(urls), "written": written}
 
 
-def download_year(year: int) -> dict:
-    total_files = sum(
-        download_pollutant_range(year, pollutant, f"{year}-01-01", f"{year}-12-31")
+def download_year(year: int, state: dict, storage_mode: str) -> dict:
+    results = [
+        download_pollutant_range(year, pollutant, f"{year}-01-01", f"{year}-12-31", state, storage_mode)
         for pollutant in POLLUTANTS
-    )
-    logger.info("Year finished | year=%s files=%s", year, total_files)
-    return {"year": year, "files": total_files}
+    ]
+    total_files = sum(r["files"] for r in results)
+    total_written = sum(r["written"] for r in results)
+    logger.info("Year finished | year=%s files=%s written=%s", year, total_files, total_written)
+    return {"year": year, "files": total_files, "written": total_written}
 
 
 # --------------------------------------------------------------------------
 # Modes
 # --------------------------------------------------------------------------
 
-def run_test():
-    """Small window, single pollutant. Doesn't touch real storage."""
-    logger.info("Starting EEA measurements ingestion | mode=test")
+def run_test(storage_mode: str):
+    """Small window, single pollutant. Doesn't touch real storage or state."""
+    logger.info("Starting EEA measurements ingestion | mode=test storage_mode=%s", storage_mode)
     to_date = (datetime.now(timezone.utc) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     from_date = (datetime.now(timezone.utc) - pd.Timedelta(days=5)).strftime("%Y-%m-%d")
 
@@ -193,11 +209,12 @@ def run_test():
 
     url = urls[0]
     content = download_file(url)
-    test_path = TEST_DIR / (Path(url).name or "test_ingestion.parquet")
-    test_path.write_bytes(content)
+    filename = Path(url).name or "test_ingestion.parquet"
+    test_path = f"{TEST_DIR}/{filename}"
+    write_bytes(test_path, content, storage_mode)
 
-    df = pd.read_parquet(test_path)
-    logger.info("Test file saved | path=%s size_kb=%.1f", test_path.resolve(), len(content) / 1024)
+    df = pd.read_parquet(BytesIO(content))
+    logger.info("Test file saved | path=%s size_kb=%.1f", test_path, len(content) / 1024)
     logger.info("Row count | %s", len(df))
     logger.info("Columns | %s", list(df.columns))
     if not df.empty:
@@ -205,54 +222,77 @@ def run_test():
         logger.info("Sample rows:\n%s", df.head(3).to_string())
 
 
-def run_historical(from_year: int, to_year: int):
+def run_historical(from_year: int, to_year: int, storage_mode: str):
     if from_year > to_year:
         raise ValueError(f"from_year ({from_year}) is after to_year ({to_year})")
 
-    logger.info("Starting EEA measurements ingestion | mode=historical years=%s-%s",
-                from_year, to_year)
-    results = [download_year(year) for year in range(from_year, to_year + 1)]
+    logger.info("Starting EEA measurements ingestion | mode=historical years=%s-%s storage_mode=%s",
+                from_year, to_year, storage_mode)
+    state = load_state(STATE_PATH, storage_mode)
+    results = [download_year(year, state, storage_mode) for year in range(from_year, to_year + 1)]
+    save_state(STATE_PATH, state, storage_mode)
+
     total_files = sum(r["files"] for r in results)
-    logger.info("Historical ingestion finished | years=%s-%s total_files=%s",
-                from_year, to_year, total_files)
+    total_written = sum(r["written"] for r in results)
+    logger.info("Historical ingestion finished | years=%s-%s total_files=%s total_written=%s",
+                from_year, to_year, total_files, total_written)
 
 
-def run_refresh_current():
-    year = datetime.now(timezone.utc).year
-    logger.info("Starting EEA measurements ingestion | mode=refresh_current year=%s", year)
+def run_refresh(storage_mode: str):
+    """
+    Re-checks every year in the current reporting-mutable window (see
+    common.reporting_window.mutable_years) — not a hardcoded year. Each
+    file is re-requested and only rewritten if its content actually
+    changed since the last run; unchanged files are left untouched.
+    """
+    years = mutable_years()
+    logger.info("Starting EEA measurements ingestion | mode=refresh years=%s storage_mode=%s",
+                years, storage_mode)
 
-    year_dir = OUT_DIR / str(year)
-    if year_dir.exists():
-        shutil.rmtree(year_dir)
-        logger.info("Deleted existing files for year=%s", year)
-    remove_manifest_entries_for_year(year)
+    state = load_state(STATE_PATH, storage_mode)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    current_year = datetime.now(timezone.utc).year
 
-    to_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    total_files = sum(
-        download_pollutant_range(year, pollutant, f"{year}-01-01", to_date)
-        for pollutant in POLLUTANTS
-    )
-    logger.info("Refresh finished | year=%s files=%s", year, total_files)
+    results = []
+    for year in years:
+        to_date = today if year == current_year else f"{year}-12-31"
+        year_results = [
+            download_pollutant_range(year, pollutant, f"{year}-01-01", to_date, state, storage_mode)
+            for pollutant in POLLUTANTS
+        ]
+        total_files = sum(r["files"] for r in year_results)
+        total_written = sum(r["written"] for r in year_results)
+        logger.info("Year finished | year=%s files=%s written=%s", year, total_files, total_written)
+        results.append({"year": year, "files": total_files, "written": total_written})
+
+    save_state(STATE_PATH, state, storage_mode)
+
+    total_files = sum(r["files"] for r in results)
+    total_written = sum(r["written"] for r in results)
+    logger.info("Refresh finished | years=%s total_files=%s total_written=%s",
+                years, total_files, total_written)
 
 
-def run(mode: str, from_year: int | None = None, to_year: int | None = None):
+def run(mode: str, storage_mode: str = "local",
+        from_year: int | None = None, to_year: int | None = None):
     if mode == "test":
-        run_test()
+        run_test(storage_mode)
     elif mode == "historical":
         if from_year is None or to_year is None:
             raise ValueError("historical mode requires both from_year and to_year")
-        run_historical(from_year, to_year)
-    elif mode == "refresh_current":
-        run_refresh_current()
+        run_historical(from_year, to_year, storage_mode)
+    elif mode == "refresh":
+        run_refresh(storage_mode)
     else:
         raise ValueError(
-            f"Unknown mode {mode!r} — expected 'test', 'historical', or 'refresh_current'"
+            f"Unknown mode {mode!r} — expected 'test', 'historical', or 'refresh'"
         )
 
 
 if __name__ == "__main__":
     run(
-        mode="test",  # Run mode: test, historical, or refresh_current
-        from_year=None,  # Start year for historical mode, e.g. 2023
-        to_year=None,  # End year for historical mode, e.g. 2025
+        mode="test",           # Run mode: test, historical, or refresh
+        storage_mode="local",  # "local" for development/testing, "cloud" for S3 (PIPELINE_S3_BUCKET)
+        from_year=None,        # Start year for historical mode, e.g. 2023
+        to_year=None,          # End year for historical mode, e.g. 2025
     )

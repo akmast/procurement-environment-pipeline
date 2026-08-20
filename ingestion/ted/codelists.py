@@ -10,8 +10,15 @@ procurement facts — hence data/reference, not data/raw.
 Source: https://github.com/OP-TED/eForms-SDK/tree/main/codelists
         (each codelist is one Genericode .gc XML file)
 
+Reads/writes go through common.storage, so storage_mode="local" (default)
+and storage_mode="cloud" (S3) run the exact same logic. Each codelist is
+only rewritten if its content hash differs from what's already stored
+(see common/change_tracking.py) — GitHub doesn't republish these often,
+so most runs should find nothing changed.
+
     from ingestion.ted.codelists import run
     run()
+    run(storage_mode="cloud")
 
 Requires: pip install requests
 """
@@ -28,12 +35,14 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from common.logging_config import setup_logging
+from common.change_tracking import has_changed, load_state, save_state
+from common.storage import write_bytes
 
 setup_logging()
 logger = logging.getLogger(__name__)
 
-OUT_DIR = Path("data/reference/ted/codelists")
-OUT_DIR.mkdir(parents=True, exist_ok=True)
+OUT_DIR = "data/reference/ted/codelists"
+STATE_PATH = f"{OUT_DIR}/state.json"
 
 RAW_BASE = "https://raw.githubusercontent.com/OP-TED/eForms-SDK/main/codelists"
 
@@ -75,14 +84,18 @@ def fetch_codelist_xml(codelist_id: str, filename: str) -> bytes | None:
     return resp.content
 
 
-def run():
+def run(storage_mode: str = "local"):
     """
     Entry point to be imported and called from main.py, e.g.:
 
         from ingestion.ted.codelists import run
         run()
     """
+    logger.info("Starting TED codelists ingestion | storage_mode=%s", storage_mode)
+    state = load_state(STATE_PATH, storage_mode)
+
     results = {}
+    written = 0
     for codelist_id, filename in CODELISTS.items():
         xml_bytes = fetch_codelist_xml(codelist_id, filename)
         if xml_bytes is None:
@@ -90,17 +103,30 @@ def run():
                            codelist_id)
             continue
 
-        out_path = OUT_DIR / f"{codelist_id}.gc.xml"
-        out_path.write_bytes(xml_bytes)
+        out_path = f"{OUT_DIR}/{codelist_id}.gc.xml"
+        changed, new_hash = has_changed(state, out_path, xml_bytes)
+        if not changed:
+            logger.info("Codelist unchanged, skipped | codelist=%s", codelist_id)
+            results[codelist_id] = out_path
+            continue
+
+        write_bytes(out_path, xml_bytes, storage_mode)
+        state[out_path] = {"content_hash": new_hash}
+        written += 1
         logger.info("Codelist saved | codelist=%s size_bytes=%s path=%s",
-                    codelist_id, len(xml_bytes), out_path.resolve())
+                    codelist_id, len(xml_bytes), out_path)
         results[codelist_id] = out_path
 
-    logger.info("Codelist ingestion finished | saved=%s/%s", len(results), len(CODELISTS))
+    save_state(STATE_PATH, state, storage_mode)
+
+    logger.info("Codelist ingestion finished | checked=%s/%s written=%s",
+                len(results), len(CODELISTS), written)
     if not results:
         logger.warning("No codelists were saved — see per-codelist errors above")
     return results
 
 
 if __name__ == "__main__":
-    run()
+    run(
+        storage_mode="local",  # "local" for development/testing, "cloud" for S3 (PIPELINE_S3_BUCKET)
+    )

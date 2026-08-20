@@ -7,29 +7,35 @@ columns, drops the non-analytical PopupInfo blob. No deduplication here —
 that's transformation.eea.stations. No country filtering either —
 ingestion already scoped the request to COUNTRY server-side.
 
+Reads/writes go through common.storage, so storage_mode="local" (default)
+and storage_mode="cloud" (S3) run the same logic.
+
     from normalization.eea.stations import run
     run()
+    run(storage_mode="cloud")
 """
 import json
 import logging
+import sys
+from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from common.storage import read_bytes, write_bytes
+
 logger = logging.getLogger(__name__)
 
-RAW_PATH = Path("data/raw/eea/stations/stations_raw.json")
-OUT_DIR = Path("data/normalized/eea/stations")
-OUT_DIR.mkdir(parents=True, exist_ok=True)
-STATION_METADATA_PATH = OUT_DIR / "station_metadata.parquet"
+RAW_PATH = "data/raw/eea/stations/stations_raw.json"
+STATION_METADATA_PATH = "data/normalized/eea/stations/station_metadata.parquet"
 
 
-def load_raw_features() -> list[dict]:
-    if not RAW_PATH.exists():
-        raise FileNotFoundError(
-            f"No raw stations file at {RAW_PATH} — run ingestion.eea.stations first."
-        )
-    return json.loads(RAW_PATH.read_text())
+def load_raw_features(storage_mode: str) -> list[dict]:
+    return json.loads(read_bytes(RAW_PATH, storage_mode).decode("utf-8"))
 
 
 def flatten_features(features: list[dict]) -> pd.DataFrame:
@@ -56,19 +62,24 @@ def drop_popup_info(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def run():
-    logger.info("Starting EEA station metadata normalization")
-    features = load_raw_features()
+def run(storage_mode: str = "local"):
+    logger.info("Starting EEA station metadata normalization | storage_mode=%s", storage_mode)
+    features = load_raw_features(storage_mode)
     df = flatten_features(features)
     df = drop_popup_info(df)
 
-    df.to_parquet(STATION_METADATA_PATH, index=False)
+    buffer = BytesIO()
+    df.to_parquet(buffer, index=False)
+    write_bytes(STATION_METADATA_PATH, buffer.getvalue(), storage_mode)
+
     logger.info("Normalized stations saved | path=%s rows=%s",
-                STATION_METADATA_PATH.resolve(), len(df))
+                STATION_METADATA_PATH, len(df))
     logger.info("Columns | %s", list(df.columns))
     if not df.empty:
         logger.info("Sample rows:\n%s", df.head(3).to_string())
 
 
 if __name__ == "__main__":
-    run()
+    run(
+        storage_mode="local",  # "local" for development/testing, "cloud" for S3 (PIPELINE_S3_BUCKET)
+    )

@@ -12,19 +12,31 @@ a merge on the raw numeric `Pollutant` code. That raw code is kept too
 (renamed to `pollutant_code`), in case it's useful later, but nothing in
 this module merges on it.
 
+Reads/writes go through common.storage, so storage_mode="local" (default)
+and storage_mode="cloud" (S3) run the same logic.
+
     from normalization.eea.measurements import run
     run()
+    run(storage_mode="cloud")
 """
 import logging
 import re
+import sys
+from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from common.storage import list_files, read_bytes, write_bytes
+
 logger = logging.getLogger(__name__)
 
-RAW_BASE_DIR = Path("data/raw/eea/measurements")
-NORMALIZED_BASE_DIR = Path("data/normalized/eea/measurements")
+RAW_BASE_DIR = "data/raw/eea/measurements"
+NORMALIZED_BASE_DIR = "data/normalized/eea/measurements"
 
 # Explicit renames for columns confirmed via a live file (2026-08-19).
 # Anything not listed here still gets converted (see _to_snake_case) and
@@ -60,13 +72,13 @@ def rename_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=rename)
 
 
-def add_pollutant_from_path(df: pd.DataFrame, raw_path: Path) -> pd.DataFrame:
+def add_pollutant_from_path(df: pd.DataFrame, raw_path: str) -> pd.DataFrame:
     """
     Pollutant name comes from the folder ingestion saved this file into
     (one API request per pollutant, see ingestion.eea.measurements) —
     reliable by construction, no merge on `pollutant_code` needed.
     """
-    pollutant = raw_path.parent.name
+    pollutant = raw_path.rsplit("/", 2)[-2]
     df.insert(0, "pollutant", pollutant)
     return df
 
@@ -84,17 +96,19 @@ def cast_types(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def normalize_file(raw_path: Path) -> Path:
-    df = pd.read_parquet(raw_path)
+def normalize_file(raw_path: str, storage_mode: str) -> str:
+    df = pd.read_parquet(BytesIO(read_bytes(raw_path, storage_mode)))
 
     df = rename_columns(df)
     df = add_pollutant_from_path(df, raw_path)
     df = cast_types(df)
 
-    relative = raw_path.relative_to(RAW_BASE_DIR)
-    out_path = NORMALIZED_BASE_DIR / relative
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(out_path, index=False)
+    relative = raw_path[len(RAW_BASE_DIR):].lstrip("/")
+    out_path = f"{NORMALIZED_BASE_DIR}/{relative}"
+
+    buffer = BytesIO()
+    df.to_parquet(buffer, index=False)
+    write_bytes(out_path, buffer.getvalue(), storage_mode)
 
     logger.info(
         "Normalized file saved | raw=%s -> normalized=%s rows=%s",
@@ -103,23 +117,26 @@ def normalize_file(raw_path: Path) -> Path:
     return out_path
 
 
-def run():
+def run(storage_mode: str = "local"):
     """
     Normalizes every raw measurements Parquet file found under
     data/raw/eea/measurements/<year>/<pollutant>/ — one output file per
     input file, same year/pollutant layout, under
     data/normalized/eea/measurements/.
     """
-    raw_files = sorted(RAW_BASE_DIR.rglob("*.parquet"))
+    raw_files = list_files(RAW_BASE_DIR, storage_mode, suffix=".parquet")
     if not raw_files:
         logger.warning("No raw measurements files found under %s", RAW_BASE_DIR)
         return
 
-    logger.info("Starting EEA measurements normalization | files=%s", len(raw_files))
+    logger.info("Starting EEA measurements normalization | files=%s storage_mode=%s",
+                len(raw_files), storage_mode)
     for raw_path in raw_files:
-        normalize_file(raw_path)
+        normalize_file(raw_path, storage_mode)
     logger.info("EEA measurements normalization finished | files=%s", len(raw_files))
 
 
 if __name__ == "__main__":
-    run()
+    run(
+        storage_mode="local",  # "local" for development/testing, "cloud" for S3 (PIPELINE_S3_BUCKET)
+    )

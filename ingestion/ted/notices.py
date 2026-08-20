@@ -7,6 +7,7 @@ Not a standalone entry point — called from root main.py:
     run_ted_ingestion(mode="test")
     run_ted_ingestion(mode="historical", from_date="2025-01-01", to_date="2025-01-31")
     run_ted_ingestion(mode="incremental")
+    run_ted_ingestion(mode="incremental", storage_mode="cloud")
 
 Saves notices exactly as TED returns them for the requested FIELDS — no
 field stripping, no language trimming. That JSON reshaping happens in
@@ -20,9 +21,12 @@ data-cleaning one: it stops repeated incremental runs from re-appending
 notices already on disk. It stays in ingestion for that reason — see the
 project docs for more on this distinction.
 
-Storage is local JSON/JSONL (data/raw/ted/), kept separate from the API/
-pagination logic so it can later be swapped for a real DB without touching
-the ingestion code.
+Reads/writes go through common.storage (storage_mode="local" or "cloud",
+see common/storage.py). Unlike EEA measurements, this source has no
+content-hash change detection and no reporting-window refresh logic —
+TED notices are treated as immutable once published, and publication-
+number dedup already gives correct incremental behavior; there's no
+redownloadable "whole snapshot" file here to hash.
 
 Confirmed via a live test call (2026-08-19, 3-notice request, SORT BY +
 paginationMode=ITERATION):
@@ -60,18 +64,17 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from common.logging_config import setup_logging
+from common.storage import append_text, exists, read_text, write_text
 
 setup_logging()
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.ted.europa.eu/v3/notices/search"
 
-OUT_DIR = Path("data/raw/ted")
-OUT_DIR.mkdir(parents=True, exist_ok=True)
-
-TEST_PATH = OUT_DIR / "test_ingestion.json"
-DATASET_PATH = OUT_DIR / "notices.jsonl"
-STATE_PATH = OUT_DIR / "state.json"
+OUT_DIR = "data/raw/ted"
+TEST_PATH = f"{OUT_DIR}/test_ingestion.json"
+DATASET_PATH = f"{OUT_DIR}/notices.jsonl"
+STATE_PATH = f"{OUT_DIR}/state.json"
 
 ISO3 = "DEU"  # server-side filter — buyer-country is a documented TED query field
 
@@ -283,56 +286,57 @@ def paginate_iteration(query: str):
 # Storage — isolated so it can later be swapped for a real DB
 # --------------------------------------------------------------------------
 
-def load_existing_publication_numbers(path: Path) -> set:
+def load_existing_publication_numbers(path: str, storage_mode: str) -> set:
     seen = set()
-    if not path.exists():
+    if not exists(path, storage_mode):
         return seen
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                seen.add(json.loads(line).get("publication-number"))
-            except json.JSONDecodeError:
-                continue
+    for line in read_text(path, storage_mode).splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            seen.add(json.loads(line).get("publication-number"))
+        except json.JSONDecodeError:
+            continue
     return seen
 
 
-def append_batch_jsonl(path: Path, batch: list, seen: set) -> tuple:
+def append_batch_jsonl(path: str, batch: list, seen: set, storage_mode: str) -> tuple:
     """Append new notices to JSONL, skipping existing publication-numbers."""
     new_count = 0
     dup_count = 0
-    with open(path, "a", encoding="utf-8") as f:
-        for notice in batch:
-            pub_num = notice.get("publication-number")
-            if pub_num in seen:
-                dup_count += 1
-                continue
-            f.write(json.dumps(notice, ensure_ascii=False) + "\n")
-            seen.add(pub_num)
-            new_count += 1
+    lines = []
+    for notice in batch:
+        pub_num = notice.get("publication-number")
+        if pub_num in seen:
+            dup_count += 1
+            continue
+        lines.append(json.dumps(notice, ensure_ascii=False))
+        seen.add(pub_num)
+        new_count += 1
+    if lines:
+        append_text(path, "\n".join(lines) + "\n", storage_mode)
     return new_count, dup_count
 
 
-def load_state() -> dict:
-    if STATE_PATH.exists():
-        return json.loads(STATE_PATH.read_text())
+def load_state(storage_mode: str) -> dict:
+    if exists(STATE_PATH, storage_mode):
+        return json.loads(read_text(STATE_PATH, storage_mode))
     return {}
 
 
-def save_state(state: dict):
-    STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+def save_state(state: dict, storage_mode: str):
+    write_text(STATE_PATH, json.dumps(state, ensure_ascii=False, indent=2), storage_mode)
 
 
-def update_state_if_newer(new_date: str) -> bool:
+def update_state_if_newer(new_date: str, storage_mode: str) -> bool:
     """
     Set last_successful_run_date = new_date, unless state.json already has
     a date that's the same or later (never move the cursor backwards —
     e.g. a historical backfill for an old period shouldn't undo progress
     already made by incremental runs). Returns True if state was updated.
     """
-    state = load_state()
+    state = load_state(storage_mode)
     current = state.get("last_successful_run_date")
     if current and current >= new_date:
         logger.info(
@@ -341,7 +345,7 @@ def update_state_if_newer(new_date: str) -> bool:
         )
         return False
     state["last_successful_run_date"] = new_date
-    save_state(state)
+    save_state(state, storage_mode)
     return True
 
 
@@ -349,9 +353,9 @@ def update_state_if_newer(new_date: str) -> bool:
 # Modes
 # --------------------------------------------------------------------------
 
-def run_test():
+def run_test(storage_mode: str):
     """One record, PAGE_NUMBER mode. Does not touch state.json or the dataset."""
-    logger.info("Starting TED ingestion | mode=test")
+    logger.info("Starting TED ingestion | mode=test storage_mode=%s", storage_mode)
     payload = {
         "query": build_query(sort=True),
         "fields": FIELDS,
@@ -370,8 +374,8 @@ def run_test():
 
     logger.info("Notices received | count=%s", len(notices))
 
-    TEST_PATH.write_text(json.dumps(notices, ensure_ascii=False, indent=2))
-    logger.info("Test ingestion saved | path=%s", TEST_PATH.resolve())
+    write_text(TEST_PATH, json.dumps(notices, ensure_ascii=False, indent=2), storage_mode)
+    logger.info("Test ingestion saved | path=%s", TEST_PATH)
 
     # Summary at INFO; full record only at DEBUG (it's a sizeable blob)
     first = notices[0]
@@ -383,10 +387,10 @@ def run_test():
     logger.debug("Full sample notice: %s", json.dumps(first, ensure_ascii=False))
 
 
-def run_historical(from_date: str = None, to_date: str = None):
+def run_historical(storage_mode: str, from_date: str = None, to_date: str = None):
     """Full pagination via ITERATION mode, saved batch-by-batch as JSONL."""
-    logger.info("Starting TED ingestion | mode=historical from_date=%s to_date=%s",
-                from_date, to_date)
+    logger.info("Starting TED ingestion | mode=historical from_date=%s to_date=%s storage_mode=%s",
+                from_date, to_date, storage_mode)
     start_time = time.monotonic()
 
     total_received = 0
@@ -398,13 +402,13 @@ def run_historical(from_date: str = None, to_date: str = None):
         query = build_query(from_date=from_date, to_date=to_date, sort=True)
         logger.debug("Historical query: %s", query)
 
-        seen = load_existing_publication_numbers(DATASET_PATH)
+        seen = load_existing_publication_numbers(DATASET_PATH, storage_mode)
         logger.info("Existing publication-numbers on disk | count=%s", len(seen))
 
         for batch in paginate_iteration(query):
             batch_count += 1
             total_received += len(batch)
-            new_count, dup_count = append_batch_jsonl(DATASET_PATH, batch, seen)
+            new_count, dup_count = append_batch_jsonl(DATASET_PATH, batch, seen, storage_mode)
             total_new += new_count
             total_dup += dup_count
             logger.info(
@@ -416,15 +420,13 @@ def run_historical(from_date: str = None, to_date: str = None):
         raise
 
     elapsed = time.monotonic() - start_time
-    output_size = DATASET_PATH.stat().st_size if DATASET_PATH.exists() else 0
 
     logger.info("Historical ingestion finished")
     logger.info(
         "Historical ingestion summary | requests=%s received=%s "
-        "unique_on_disk=%s duplicates=%s new_saved=%s elapsed=%.1fs "
-        "output_size_kb=%.1f output_path=%s",
+        "unique_on_disk=%s duplicates=%s new_saved=%s elapsed=%.1fs output_path=%s",
         batch_count, total_received, len(seen), total_dup, total_new,
-        elapsed, output_size / 1024, DATASET_PATH,
+        elapsed, DATASET_PATH,
     )
 
     # Only a bounded range (explicit to_date) represents a fully-covered
@@ -432,7 +434,7 @@ def run_historical(from_date: str = None, to_date: str = None):
     # open-ended historical load (no to_date) has no such endpoint, so we
     # deliberately don't touch state.json in that case.
     if to_date:
-        updated = update_state_if_newer(to_date)
+        updated = update_state_if_newer(to_date, storage_mode)
         if updated:
             logger.info(
                 "Historical load completed successfully. State updated: "
@@ -450,10 +452,10 @@ def run_historical(from_date: str = None, to_date: str = None):
         )
 
 
-def run_incremental():
+def run_incremental(storage_mode: str):
     """Loads notices since last successful run; updates state.json only on success."""
-    logger.info("Starting TED ingestion | mode=incremental")
-    state = load_state()
+    logger.info("Starting TED ingestion | mode=incremental storage_mode=%s", storage_mode)
+    state = load_state(storage_mode)
     since_date = state.get("last_successful_run_date")
 
     if since_date:
@@ -474,13 +476,13 @@ def run_incremental():
         query = build_query(since_date=since_date, sort=True)
         logger.debug("Incremental query: %s", query)
 
-        seen = load_existing_publication_numbers(DATASET_PATH)
+        seen = load_existing_publication_numbers(DATASET_PATH, storage_mode)
         logger.info("Existing publication-numbers on disk | count=%s", len(seen))
 
         for batch in paginate_iteration(query):
             batch_count += 1
             total_received += len(batch)
-            new_count, dup_count = append_batch_jsonl(DATASET_PATH, batch, seen)
+            new_count, dup_count = append_batch_jsonl(DATASET_PATH, batch, seen, storage_mode)
             total_new += new_count
             total_dup += dup_count
             logger.info(
@@ -502,7 +504,7 @@ def run_incremental():
 
     # Only update state after full success
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    updated = update_state_if_newer(today)
+    updated = update_state_if_newer(today, storage_mode)
     if updated:
         logger.info(
             "Incremental load completed successfully. State updated: "
@@ -516,7 +518,8 @@ def run_incremental():
 # Public entry point
 # --------------------------------------------------------------------------
 
-def run(mode: str, from_date: str | None = None, to_date: str | None = None):
+def run(mode: str, storage_mode: str = "local",
+        from_date: str | None = None, to_date: str | None = None):
     """
     Called from root main.py:
 
@@ -526,11 +529,11 @@ def run(mode: str, from_date: str | None = None, to_date: str | None = None):
     CLI argument parsing lives in main.py, not here.
     """
     if mode == "test":
-        run_test()
+        run_test(storage_mode)
     elif mode == "historical":
-        run_historical(from_date=from_date, to_date=to_date)
+        run_historical(storage_mode, from_date=from_date, to_date=to_date)
     elif mode == "incremental":
-        run_incremental()
+        run_incremental(storage_mode)
     else:
         raise ValueError(
             f"Unknown mode {mode!r} — expected 'test', 'historical', or 'incremental'"
@@ -540,6 +543,7 @@ def run(mode: str, from_date: str | None = None, to_date: str | None = None):
 if __name__ == "__main__":
     run(
         mode="test",              # Run mode: test, historical, or incremental
+        storage_mode="local",    # "local" for development/testing, "cloud" for S3 (PIPELINE_S3_BUCKET)
         from_date="2025-01-01",  # Start date for historical mode (YYYY-MM-DD)
         to_date="2025-01-31",    # End date for historical mode (YYYY-MM-DD)
     )

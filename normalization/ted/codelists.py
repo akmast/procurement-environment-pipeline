@@ -4,19 +4,29 @@ TED reference codelists normalization.
 Reads the raw Genericode XML files saved by ingestion.ted.codelists and
 parses each into a flat, joinable list of {column: value} rows.
 
+Reads/writes go through common.storage, so storage_mode="local" (default)
+and storage_mode="cloud" (S3) run the same logic.
+
     from normalization.ted.codelists import run
     run()
+    run(storage_mode="cloud")
 """
 import json
 import logging
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from common.storage import list_files, read_bytes, write_text
+
 logger = logging.getLogger(__name__)
 
-RAW_DIR = Path("data/reference/ted/codelists")
-OUT_DIR = Path("data/normalized/ted/codelists")
-OUT_DIR.mkdir(parents=True, exist_ok=True)
+RAW_DIR = "data/reference/ted/codelists"
+OUT_DIR = "data/normalized/ted/codelists"
 
 
 def parse_genericode(xml_bytes: bytes) -> list[dict]:
@@ -50,16 +60,20 @@ def parse_genericode(xml_bytes: bytes) -> list[dict]:
     return rows_out
 
 
-def run():
-    if not RAW_DIR.exists():
+def run(storage_mode: str = "local"):
+    logger.info("Starting TED codelists normalization | storage_mode=%s", storage_mode)
+
+    xml_files = list_files(RAW_DIR, storage_mode, suffix=".gc.xml")
+    if not xml_files:
         raise FileNotFoundError(
-            f"No raw codelists directory at {RAW_DIR} — run ingestion.ted.codelists first."
+            f"No raw codelist files found under {RAW_DIR} — run ingestion.ted.codelists first."
         )
 
     results = {}
-    for xml_path in sorted(RAW_DIR.glob("*.gc.xml")):
-        codelist_id = xml_path.name.removesuffix(".gc.xml")
-        rows = parse_genericode(xml_path.read_bytes())
+    for xml_path in xml_files:
+        filename = xml_path.rsplit("/", 1)[-1]
+        codelist_id = filename.removesuffix(".gc.xml")
+        rows = parse_genericode(read_bytes(xml_path, storage_mode))
         if not rows:
             logger.warning(
                 "Codelist parsed 0 rows | codelist=%s — XML structure may not "
@@ -67,10 +81,10 @@ def run():
             )
             continue
 
-        out_path = OUT_DIR / f"{codelist_id}.json"
-        out_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2))
+        out_path = f"{OUT_DIR}/{codelist_id}.json"
+        write_text(out_path, json.dumps(rows, ensure_ascii=False, indent=2), storage_mode)
         logger.info("Codelist normalized | codelist=%s rows=%s path=%s",
-                    codelist_id, len(rows), out_path.resolve())
+                    codelist_id, len(rows), out_path)
         results[codelist_id] = out_path
 
     logger.info("Codelist normalization finished | saved=%s", len(results))
@@ -78,4 +92,6 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    run(
+        storage_mode="local",  # "local" for development/testing, "cloud" for S3 (PIPELINE_S3_BUCKET)
+    )
