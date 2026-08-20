@@ -87,7 +87,7 @@ BASE_URL = "https://api.ted.europa.eu/v3/notices/search"
 
 OUT_DIR = "data/raw/ted"
 
-DEFAULT_COUNTRIES = ["DE"]  # preserves the pipeline's previous single-country (ISO2) behavior
+DEFAULT_COUNTRIES = ["DE", "PL"]
 
 # TED's query language wants ISO3 buyer-country codes; the rest of this
 # project (storage paths, the countries= parameter, other sources) uses

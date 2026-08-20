@@ -59,7 +59,7 @@ STATIONS_ENDPOINT = (
     "AirQualityDownloadServiceEUMonitoringStations/MapServer/0/query"
 )
 STATIONS_PAGE_SIZE = 2000
-DEFAULT_COUNTRIES = ["DE"]  # preserves the pipeline's previous single-country behavior
+DEFAULT_COUNTRIES = ["DE", "PL"]
 
 OUT_DIR = "data/raw/eea/stations"
 

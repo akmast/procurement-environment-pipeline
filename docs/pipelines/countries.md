@@ -11,8 +11,7 @@ Every `run(...)` across ingestion/normalization/transformation now takes
 ...) — the same code space as the storage directory names below.
 
 - **ingestion** — `countries` defaults to the pipeline's own
-  `DEFAULT_COUNTRIES` (currently `["DE"]`, preserving each pipeline's
-  previous single-country behavior) if not passed.
+  `DEFAULT_COUNTRIES` (currently `["DE", "PL"]`) if not passed.
 - **normalization/transformation** — if `countries` isn't passed, every
   country already present at the previous layer is auto-discovered by
   listing that layer's own `<country>/` subdirectories (not guessed from

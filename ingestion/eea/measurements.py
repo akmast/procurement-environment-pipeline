@@ -74,7 +74,7 @@ URLS_ENDPOINT = f"{API_BASE}/ParquetFile/urls"
 OUT_DIR = "data/raw/eea/measurements"
 TEST_DIR = "data/raw/eea/test"
 
-DEFAULT_COUNTRIES = ["DE"]  # preserves the pipeline's previous single-country behavior
+DEFAULT_COUNTRIES = ["DE", "PL"]
 POLLUTANTS = ["PM10", "PM2.5", "NO2", "O3", "SO2"]  # one request per entry, not one request for all
 DATASET = 1  # E2a / Unverified / UTD
 AGGREGATION_TYPE = "day"
