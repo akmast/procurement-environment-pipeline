@@ -35,6 +35,17 @@ explicitly — a different, more directly usable code space than `geo`
 (NUTS2, e.g. "DE11"), same convention as every other source in this
 project that adds an explicit country_code column.
 
+Confirmed against a real downloaded file (2026-08-20, DE/2021): the cube
+has 90 am_item codes and 4 indic_agr codes (not just the one narrow
+series ingestion's discovery queries use) — 4976 of the 90×4×38=13680
+possible cells have an actual value; a further 4636 have no value but do
+have a `status` flag explaining why (Eurostat's real data uses "m",
+meaning "data cannot exist for this combination" per SDMX's
+CL_OBS_STATUS); the remaining ~4068 cells are simply absent with no
+flag. `status`'s keys never overlap with `value`'s keys, so it can't be
+attached as a column on the observations table — see
+summarize_status_flags(), logged per file rather than silently dropped.
+
 `countries` must be passed explicitly — run() never defaults to scanning
 and processing every country on disk (see docs/pipelines/countries.md).
 Each entry can be a country code, a finer "country/year" partition
@@ -114,6 +125,35 @@ def decode_flat_index(flat_index: int, sizes: list[int], strides: list[int]) -> 
     return [(flat_index // strides[i]) % sizes[i] for i in range(len(sizes))]
 
 
+def summarize_status_flags(payload: dict) -> dict:
+    """
+    JSON-stat's optional `status` field flags *why* a cell has no value —
+    e.g. Eurostat's real data confirmed the flag "m" ("data cannot exist
+    for this combination", per SDMX's CL_OBS_STATUS). Confirmed live: its
+    keys (flat indices) never overlap with `value`'s keys — a cell either
+    has a number or a status flag explaining its absence, never both — so
+    there's no per-row column to attach this to in melt_json_stat's output
+    (that table is "one row per actual observation"). Logged here instead
+    so the information isn't silently lost; not merged into the main
+    table pending a transformation-stage decision on whether/how it's
+    useful downstream.
+    """
+    total_cells = 1
+    for size in payload["size"]:
+        total_cells *= size
+    value_count = len(payload.get("value") or {})
+    status = payload.get("status") or {}
+    status_count = len(status)
+    unexplained = total_cells - value_count - status_count
+    return {
+        "total_cells": total_cells,
+        "with_value": value_count,
+        "with_status_flag": status_count,
+        "status_flag_codes": sorted(set(status.values())) if isinstance(status, dict) else [],
+        "unexplained_empty": unexplained,
+    }
+
+
 def melt_json_stat(payload: dict, country: str) -> pd.DataFrame:
     dimension_ids = payload["id"]
     sizes = payload["size"]
@@ -160,6 +200,15 @@ def normalize_file(raw_path: str, storage_mode: str) -> str:
 
     df = melt_json_stat(payload, country)
     df = cast_types(df)
+
+    status_summary = summarize_status_flags(payload)
+    logger.info(
+        "Cube cell accounting | raw=%s total_cells=%s with_value=%s with_status_flag=%s "
+        "status_flag_codes=%s unexplained_empty=%s",
+        raw_path, status_summary["total_cells"], status_summary["with_value"],
+        status_summary["with_status_flag"], status_summary["status_flag_codes"],
+        status_summary["unexplained_empty"],
+    )
 
     out_path = f"{NORMALIZED_BASE_DIR}/{relative.removesuffix('.json')}.parquet"
     buffer = BytesIO()
