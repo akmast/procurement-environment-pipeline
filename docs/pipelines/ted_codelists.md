@@ -9,8 +9,9 @@ procurement facts — hence `data/reference/`, not `data/raw/`.
 
 ## Source
 
-GitHub repository `OP-TED/eForms-SDK`, `codelists/` folder. Each codelist
-is one Genericode XML file (`.gc`).
+GitHub repository `OP-TED/eForms-SDK` (official Publications Office of
+the EU repo): https://github.com/OP-TED/eForms-SDK/tree/main/codelists.
+Each codelist is one Genericode XML file (`.gc`).
 
 ```
 Method: GET

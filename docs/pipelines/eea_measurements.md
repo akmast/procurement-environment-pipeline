@@ -136,8 +136,13 @@ AggType          e.g. "day"
 Validity
 Verification
 ResultTime
-DataCapture
-FkObservationId  (or similarly-named id column — truncated in the sample seen)
+DataCapture       confirmed always null across every observed file
+                  (2026-08-19) — dropped in normalization, no
+                  information to carry forward.
+FkObservationLog  internal EEA housekeeping reference (name confirmed
+                  live 2026-08-19 — earlier docs guessed
+                  "FkObservationId", that was wrong). Dropped in
+                  normalization — not useful at this stage.
 ```
 
 ## Normalization — `normalization/eea/measurements.py`
@@ -147,7 +152,8 @@ works the same in `local`/`cloud`) and writes one normalized file per
 input file, mirroring the same `<year>/<pollutant>/` layout under
 `data/normalized/eea/measurements/`. Renames columns to snake_case
 (explicit map for the confirmed columns above; anything unrecognized is
-auto-converted and logged, never silently guessed), casts `value` from
+auto-converted and logged, never silently guessed), drops `data_capture`
+and `fk_observation_log` (see "Parquet schema" above for why), casts `value` from
 its raw `Decimal` form to `float` and the date-ish columns to
 `datetime64`, and adds a `pollutant` column read from the raw file's own
 folder path — never from a merge on `pollutant_code` (the renamed raw

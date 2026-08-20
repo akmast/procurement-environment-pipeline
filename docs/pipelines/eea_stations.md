@@ -14,7 +14,12 @@ ingestion request itself (see below).
 
 ## Source
 
-EEA ArcGIS FeatureServer:
+EEA ArcGIS FeatureServer. Service's own self-documenting directory page
+(field list, geometry type, capabilities):
+https://air.discomap.eea.europa.eu/arcgis/rest/services/AirQuality/AirQualityDownloadServiceEUMonitoringStations/MapServer
+— the general `where`/pagination query contract this service follows is
+the standard Esri ArcGIS REST API, documented at
+https://developers.arcgis.com/rest/services-reference/enterprise/query-feature-service-layer/.
 
 ```
 Method: GET

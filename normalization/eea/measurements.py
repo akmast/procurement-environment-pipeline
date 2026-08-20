@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 RAW_BASE_DIR = "data/raw/eea/measurements"
 NORMALIZED_BASE_DIR = "data/normalized/eea/measurements"
 
-# Explicit renames for columns confirmed via a live file (2026-08-19).
+# Explicit renames for columns confirmed via live files (2026-08-19).
 # Anything not listed here still gets converted (see _to_snake_case) and
 # logged as a warning, instead of being silently dropped or guessed at.
 COLUMN_RENAME = {
@@ -53,7 +53,13 @@ COLUMN_RENAME = {
     "Verification": "verification",
     "ResultTime": "result_time",
     "DataCapture": "data_capture",
+    "FkObservationLog": "fk_observation_log",  # confirmed live 2026-08-19 — was a guessed name before
 }
+
+# Dropped after renaming — confirmed via live files (2026-08-19):
+#   data_capture      always null across every observed file, no information to carry
+#   fk_observation_log  internal EEA housekeeping reference, not useful at this stage
+DROP_COLUMNS = ["data_capture", "fk_observation_log"]
 
 
 def _to_snake_case(name: str) -> str:
@@ -70,6 +76,13 @@ def rename_columns(df: pd.DataFrame) -> pd.DataFrame:
     rename = {c: _to_snake_case(c) for c in unmapped}
     rename.update(COLUMN_RENAME)
     return df.rename(columns=rename)
+
+
+def drop_unused_columns(df: pd.DataFrame) -> pd.DataFrame:
+    present = [c for c in DROP_COLUMNS if c in df.columns]
+    if present:
+        df = df.drop(columns=present)
+    return df
 
 
 def add_pollutant_from_path(df: pd.DataFrame, raw_path: str) -> pd.DataFrame:
@@ -100,6 +113,7 @@ def normalize_file(raw_path: str, storage_mode: str) -> str:
     df = pd.read_parquet(BytesIO(read_bytes(raw_path, storage_mode)))
 
     df = rename_columns(df)
+    df = drop_unused_columns(df)
     df = add_pollutant_from_path(df, raw_path)
     df = cast_types(df)
 

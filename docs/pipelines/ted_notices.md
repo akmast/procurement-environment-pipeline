@@ -10,7 +10,10 @@ other fields we asked for.
 
 ## Source
 
-TED (Tenders Electronic Daily) API v3.
+TED (Tenders Electronic Daily) API v3. Official developer documentation:
+https://docs.ted.europa.eu/api/latest/index.html (overview at
+https://ted.europa.eu/en/ted-api/documentation, interactive Swagger at
+https://api.ted.europa.eu/swagger).
 
 ```
 Method: POST
