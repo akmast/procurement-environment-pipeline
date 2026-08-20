@@ -7,19 +7,33 @@ Not a standalone entry point — called from root main.py:
     run_ted_ingestion(mode="test")
     run_ted_ingestion(mode="historical", from_date="2025-01-01", to_date="2025-01-31")
     run_ted_ingestion(mode="incremental")
+    run_ted_ingestion(mode="incremental", countries=["DE", "PL"])
     run_ted_ingestion(mode="incremental", storage_mode="cloud")
 
 Saves notices exactly as TED returns them for the requested FIELDS — no
-field stripping, no language trimming. That JSON reshaping happens in
+field stripping, no language trimming, no added columns. That JSON
+reshaping (including stamping an explicit country_code) happens in
 normalization.ted.notices. Country scope (buyer-country) is applied
 server-side, inside the TED query string itself — TED's expert query
 language processes it before any notices are returned, so this is not a
 post-fetch filter.
 
+Multiple countries: one TED query per country (mirrors the same
+one-request-per-scope pattern used by the EEA pipelines), each with its
+own storage path, dedup set, and state.json cursor — a slow/failed
+country never blocks or corrupts another's progress. The project's
+`countries` parameter is ISO2 (e.g. "DE", "PL", matching every other
+source and the storage directory names) — TED's own query language wants
+ISO3 (`buyer-country=DEU`), so ISO2 is translated to ISO3 only for
+building the query string via EU_ISO2_TO_ISO3 below; storage paths and
+the country_code column added in normalization stay ISO2.
+
 The publication-number dedup here is a storage/idempotency concern, not a
 data-cleaning one: it stops repeated incremental runs from re-appending
 notices already on disk. It stays in ingestion for that reason — see the
-project docs for more on this distinction.
+project docs for more on this distinction. Dedup is scoped per country
+(each country has its own notices.jsonl), so it never needs cross-country
+publication-number comparisons.
 
 Reads/writes go through common.storage (storage_mode="local" or "cloud",
 see common/storage.py). Unlike EEA measurements, this source has no
@@ -72,11 +86,22 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://api.ted.europa.eu/v3/notices/search"
 
 OUT_DIR = "data/raw/ted"
-TEST_PATH = f"{OUT_DIR}/test_ingestion.json"
-DATASET_PATH = f"{OUT_DIR}/notices.jsonl"
-STATE_PATH = f"{OUT_DIR}/state.json"
 
-ISO3 = "DEU"  # server-side filter — buyer-country is a documented TED query field
+DEFAULT_COUNTRIES = ["DE"]  # preserves the pipeline's previous single-country (ISO2) behavior
+
+# TED's query language wants ISO3 buyer-country codes; the rest of this
+# project (storage paths, the countries= parameter, other sources) uses
+# ISO2. Scoped to EU member states, matching this pipeline's actual scope
+# (EU public procurement) — an unmapped code fails loudly (see
+# iso2_to_iso3 below) rather than silently guessing a conversion.
+EU_ISO2_TO_ISO3 = {
+    "AT": "AUT", "BE": "BEL", "BG": "BGR", "HR": "HRV", "CY": "CYP",
+    "CZ": "CZE", "DK": "DNK", "EE": "EST", "FI": "FIN", "FR": "FRA",
+    "DE": "DEU", "GR": "GRC", "HU": "HUN", "IE": "IRL", "IT": "ITA",
+    "LV": "LVA", "LT": "LTU", "LU": "LUX", "MT": "MLT", "NL": "NLD",
+    "PL": "POL", "PT": "PRT", "RO": "ROU", "SK": "SVK", "SI": "SVN",
+    "ES": "ESP", "SE": "SWE",
+}
 
 FIELDS = [
     "publication-number", "notice-title", "buyer-name", "buyer-country",
@@ -95,6 +120,25 @@ ENV_CPV_CODES = [
 SORT_BY_CLAUSE = "SORT BY publication-date DESC"
 
 MAX_RETRIES = 3
+
+
+def iso2_to_iso3(country: str) -> str:
+    try:
+        return EU_ISO2_TO_ISO3[country]
+    except KeyError:
+        raise ValueError(
+            f"Unknown country {country!r} — expected an EU member state ISO2 "
+            f"code (e.g. 'DE', 'PL'). Known codes: {sorted(EU_ISO2_TO_ISO3)}"
+        )
+
+
+def country_paths(country: str) -> dict:
+    base = f"{OUT_DIR}/{country}"
+    return {
+        "test": f"{base}/test_ingestion.json",
+        "dataset": f"{base}/notices.jsonl",
+        "state": f"{base}/state.json",
+    }
 
 
 def to_ted_date(user_date: str) -> str:
@@ -120,7 +164,7 @@ def to_ted_date(user_date: str) -> str:
 # Query construction — parameterized, no hardcoded date
 # --------------------------------------------------------------------------
 
-def build_query(from_date: str = None, to_date: str = None,
+def build_query(iso3: str, from_date: str = None, to_date: str = None,
                  since_date: str = None, sort: bool = True) -> str:
     """
     Base filters (buyer-country / notice-type / environment CPV) are fixed
@@ -139,7 +183,7 @@ def build_query(from_date: str = None, to_date: str = None,
     """
     cpv_clause = " OR ".join(f"classification-cpv={c}" for c in ENV_CPV_CODES)
     parts = [
-        f"buyer-country={ISO3}",
+        f"buyer-country={iso3}",
         "notice-type=can-standard",
         f"({cpv_clause})",
     ]
@@ -319,24 +363,24 @@ def append_batch_jsonl(path: str, batch: list, seen: set, storage_mode: str) -> 
     return new_count, dup_count
 
 
-def load_state(storage_mode: str) -> dict:
-    if exists(STATE_PATH, storage_mode):
-        return json.loads(read_text(STATE_PATH, storage_mode))
+def load_state(state_path: str, storage_mode: str) -> dict:
+    if exists(state_path, storage_mode):
+        return json.loads(read_text(state_path, storage_mode))
     return {}
 
 
-def save_state(state: dict, storage_mode: str):
-    write_text(STATE_PATH, json.dumps(state, ensure_ascii=False, indent=2), storage_mode)
+def save_state(state_path: str, state: dict, storage_mode: str):
+    write_text(state_path, json.dumps(state, ensure_ascii=False, indent=2), storage_mode)
 
 
-def update_state_if_newer(new_date: str, storage_mode: str) -> bool:
+def update_state_if_newer(state_path: str, new_date: str, storage_mode: str) -> bool:
     """
     Set last_successful_run_date = new_date, unless state.json already has
     a date that's the same or later (never move the cursor backwards —
     e.g. a historical backfill for an old period shouldn't undo progress
     already made by incremental runs). Returns True if state was updated.
     """
-    state = load_state(storage_mode)
+    state = load_state(state_path, storage_mode)
     current = state.get("last_successful_run_date")
     if current and current >= new_date:
         logger.info(
@@ -345,7 +389,7 @@ def update_state_if_newer(new_date: str, storage_mode: str) -> bool:
         )
         return False
     state["last_successful_run_date"] = new_date
-    save_state(state, storage_mode)
+    save_state(state_path, state, storage_mode)
     return True
 
 
@@ -353,172 +397,184 @@ def update_state_if_newer(new_date: str, storage_mode: str) -> bool:
 # Modes
 # --------------------------------------------------------------------------
 
-def run_test(storage_mode: str):
-    """One record, PAGE_NUMBER mode. Does not touch state.json or the dataset."""
-    logger.info("Starting TED ingestion | mode=test storage_mode=%s", storage_mode)
-    payload = {
-        "query": build_query(sort=True),
-        "fields": FIELDS,
-        "page": 1,
-        "limit": 1,
-        "paginationMode": "PAGE_NUMBER",
-    }
-    data = call_api(payload)
-    logger.info("API request completed | status=200")
-    logger.debug("Response top-level keys: %s", list(data.keys()))
+def run_test(countries: list[str], storage_mode: str):
+    """One record per country, PAGE_NUMBER mode. Does not touch state.json or the dataset."""
+    logger.info("Starting TED ingestion | mode=test countries=%s storage_mode=%s", countries, storage_mode)
 
-    notices = data.get("notices", data.get("results", []))
-    if not notices:
-        logger.warning("Test request returned 0 notices — check the query filters")
-        return
+    for country in countries:
+        iso3 = iso2_to_iso3(country)
+        paths = country_paths(country)
+        payload = {
+            "query": build_query(iso3, sort=True),
+            "fields": FIELDS,
+            "page": 1,
+            "limit": 1,
+            "paginationMode": "PAGE_NUMBER",
+        }
+        data = call_api(payload)
+        logger.info("API request completed | country=%s status=200", country)
+        logger.debug("Response top-level keys: %s", list(data.keys()))
 
-    logger.info("Notices received | count=%s", len(notices))
+        notices = data.get("notices", data.get("results", []))
+        if not notices:
+            logger.warning("Test request returned 0 notices | country=%s — check the query filters", country)
+            continue
 
-    write_text(TEST_PATH, json.dumps(notices, ensure_ascii=False, indent=2), storage_mode)
-    logger.info("Test ingestion saved | path=%s", TEST_PATH)
+        logger.info("Notices received | country=%s count=%s", country, len(notices))
 
-    # Summary at INFO; full record only at DEBUG (it's a sizeable blob)
-    first = notices[0]
-    logger.info(
-        "Sample notice | publication_number=%s notice_type=%s publication_date=%s",
-        first.get("publication-number"), first.get("notice-type"),
-        first.get("publication-date"),
-    )
-    logger.debug("Full sample notice: %s", json.dumps(first, ensure_ascii=False))
+        write_text(paths["test"], json.dumps(notices, ensure_ascii=False, indent=2), storage_mode)
+        logger.info("Test ingestion saved | country=%s path=%s", country, paths["test"])
+
+        # Summary at INFO; full record only at DEBUG (it's a sizeable blob)
+        first = notices[0]
+        logger.info(
+            "Sample notice | country=%s publication_number=%s notice_type=%s publication_date=%s",
+            country, first.get("publication-number"), first.get("notice-type"),
+            first.get("publication-date"),
+        )
+        logger.debug("Full sample notice: %s", json.dumps(first, ensure_ascii=False))
 
 
-def run_historical(storage_mode: str, from_date: str = None, to_date: str = None):
-    """Full pagination via ITERATION mode, saved batch-by-batch as JSONL."""
-    logger.info("Starting TED ingestion | mode=historical from_date=%s to_date=%s storage_mode=%s",
-                from_date, to_date, storage_mode)
-    start_time = time.monotonic()
+def run_historical(countries: list[str], storage_mode: str, from_date: str = None, to_date: str = None):
+    """Full pagination via ITERATION mode per country, saved batch-by-batch as JSONL."""
+    logger.info("Starting TED ingestion | mode=historical countries=%s from_date=%s to_date=%s storage_mode=%s",
+                countries, from_date, to_date, storage_mode)
 
-    total_received = 0
-    total_new = 0
-    total_dup = 0
-    batch_count = 0
+    for country in countries:
+        iso3 = iso2_to_iso3(country)
+        paths = country_paths(country)
+        start_time = time.monotonic()
 
-    try:
-        query = build_query(from_date=from_date, to_date=to_date, sort=True)
-        logger.debug("Historical query: %s", query)
+        total_received = 0
+        total_new = 0
+        total_dup = 0
+        batch_count = 0
 
-        seen = load_existing_publication_numbers(DATASET_PATH, storage_mode)
-        logger.info("Existing publication-numbers on disk | count=%s", len(seen))
+        try:
+            query = build_query(iso3, from_date=from_date, to_date=to_date, sort=True)
+            logger.debug("Historical query | country=%s: %s", country, query)
 
-        for batch in paginate_iteration(query):
-            batch_count += 1
-            total_received += len(batch)
-            new_count, dup_count = append_batch_jsonl(DATASET_PATH, batch, seen, storage_mode)
-            total_new += new_count
-            total_dup += dup_count
-            logger.info(
-                "Batch saved | batch=%s new=%s duplicates=%s running_total=%s",
-                batch_count, new_count, dup_count, len(seen),
-            )
-    except Exception:
-        logger.exception("Historical ingestion failed — state.json will NOT be updated")
-        raise
+            seen = load_existing_publication_numbers(paths["dataset"], storage_mode)
+            logger.info("Existing publication-numbers on disk | country=%s count=%s", country, len(seen))
 
-    elapsed = time.monotonic() - start_time
+            for batch in paginate_iteration(query):
+                batch_count += 1
+                total_received += len(batch)
+                new_count, dup_count = append_batch_jsonl(paths["dataset"], batch, seen, storage_mode)
+                total_new += new_count
+                total_dup += dup_count
+                logger.info(
+                    "Batch saved | country=%s batch=%s new=%s duplicates=%s running_total=%s",
+                    country, batch_count, new_count, dup_count, len(seen),
+                )
+        except Exception:
+            logger.exception("Historical ingestion failed | country=%s — state.json will NOT be updated", country)
+            raise
 
-    logger.info("Historical ingestion finished")
-    logger.info(
-        "Historical ingestion summary | requests=%s received=%s "
-        "unique_on_disk=%s duplicates=%s new_saved=%s elapsed=%.1fs output_path=%s",
-        batch_count, total_received, len(seen), total_dup, total_new,
-        elapsed, DATASET_PATH,
-    )
+        elapsed = time.monotonic() - start_time
 
-    # Only a bounded range (explicit to_date) represents a fully-covered
-    # period we can safely record as "successfully loaded through". An
-    # open-ended historical load (no to_date) has no such endpoint, so we
-    # deliberately don't touch state.json in that case.
-    if to_date:
-        updated = update_state_if_newer(to_date, storage_mode)
-        if updated:
-            logger.info(
-                "Historical load completed successfully. State updated: "
-                "last_successful_date=%s", to_date,
-            )
+        logger.info("Historical ingestion finished | country=%s", country)
+        logger.info(
+            "Historical ingestion summary | country=%s requests=%s received=%s "
+            "unique_on_disk=%s duplicates=%s new_saved=%s elapsed=%.1fs output_path=%s",
+            country, batch_count, total_received, len(seen), total_dup, total_new,
+            elapsed, paths["dataset"],
+        )
+
+        # Only a bounded range (explicit to_date) represents a fully-covered
+        # period we can safely record as "successfully loaded through". An
+        # open-ended historical load (no to_date) has no such endpoint, so we
+        # deliberately don't touch state.json in that case.
+        if to_date:
+            updated = update_state_if_newer(paths["state"], to_date, storage_mode)
+            if updated:
+                logger.info(
+                    "Historical load completed successfully. State updated | "
+                    "country=%s last_successful_date=%s", country, to_date,
+                )
+            else:
+                logger.info(
+                    "Historical load completed successfully. State left "
+                    "unchanged | country=%s (see reason above).", country,
+                )
         else:
             logger.info(
-                "Historical load completed successfully. State left "
-                "unchanged (see reason above)."
+                "Historical load completed successfully. No --to-date given — "
+                "state.json left unchanged | country=%s", country,
             )
-    else:
+
+
+def run_incremental(countries: list[str], storage_mode: str):
+    """Loads notices since last successful run per country; updates each country's state.json only on success."""
+    logger.info("Starting TED ingestion | mode=incremental countries=%s storage_mode=%s", countries, storage_mode)
+
+    for country in countries:
+        iso3 = iso2_to_iso3(country)
+        paths = country_paths(country)
+        state = load_state(paths["state"], storage_mode)
+        since_date = state.get("last_successful_run_date")
+
+        if since_date:
+            logger.info("Starting incremental load | country=%s from=%s", country, since_date)
+        else:
+            logger.warning(
+                "No prior state found | country=%s — this will fetch everything matching "
+                "the filters (first run)", country,
+            )
+
+        total_received = 0
+        total_new = 0
+        total_dup = 0
+        batch_count = 0
+        start_time = time.monotonic()
+
+        try:
+            query = build_query(iso3, since_date=since_date, sort=True)
+            logger.debug("Incremental query | country=%s: %s", country, query)
+
+            seen = load_existing_publication_numbers(paths["dataset"], storage_mode)
+            logger.info("Existing publication-numbers on disk | country=%s count=%s", country, len(seen))
+
+            for batch in paginate_iteration(query):
+                batch_count += 1
+                total_received += len(batch)
+                new_count, dup_count = append_batch_jsonl(paths["dataset"], batch, seen, storage_mode)
+                total_new += new_count
+                total_dup += dup_count
+                logger.info(
+                    "Batch saved | country=%s batch=%s new=%s duplicates=%s",
+                    country, batch_count, new_count, dup_count,
+                )
+        except Exception:
+            logger.exception("Incremental ingestion failed | country=%s — state.json will NOT be updated", country)
+            raise  # do not update state on failure
+
+        elapsed = time.monotonic() - start_time
+
+        logger.info("Incremental ingestion finished | country=%s", country)
         logger.info(
-            "Historical load completed successfully. No --to-date given — "
-            "state.json left unchanged."
+            "Incremental ingestion summary | country=%s requests=%s received=%s "
+            "new_saved=%s duplicates=%s elapsed=%.1fs",
+            country, batch_count, total_received, total_new, total_dup, elapsed,
         )
 
-
-def run_incremental(storage_mode: str):
-    """Loads notices since last successful run; updates state.json only on success."""
-    logger.info("Starting TED ingestion | mode=incremental storage_mode=%s", storage_mode)
-    state = load_state(storage_mode)
-    since_date = state.get("last_successful_run_date")
-
-    if since_date:
-        logger.info("Starting incremental load from: %s", since_date)
-    else:
-        logger.warning(
-            "No prior state found — this will fetch everything matching "
-            "the filters (first run)"
-        )
-
-    total_received = 0
-    total_new = 0
-    total_dup = 0
-    batch_count = 0
-    start_time = time.monotonic()
-
-    try:
-        query = build_query(since_date=since_date, sort=True)
-        logger.debug("Incremental query: %s", query)
-
-        seen = load_existing_publication_numbers(DATASET_PATH, storage_mode)
-        logger.info("Existing publication-numbers on disk | count=%s", len(seen))
-
-        for batch in paginate_iteration(query):
-            batch_count += 1
-            total_received += len(batch)
-            new_count, dup_count = append_batch_jsonl(DATASET_PATH, batch, seen, storage_mode)
-            total_new += new_count
-            total_dup += dup_count
+        # Only update state after full success
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        updated = update_state_if_newer(paths["state"], today, storage_mode)
+        if updated:
             logger.info(
-                "Batch saved | batch=%s new=%s duplicates=%s",
-                batch_count, new_count, dup_count,
+                "Incremental load completed successfully. State updated | "
+                "country=%s last_successful_date=%s", country, today,
             )
-    except Exception:
-        logger.exception("Incremental ingestion failed — state.json will NOT be updated")
-        raise  # do not update state on failure
-
-    elapsed = time.monotonic() - start_time
-
-    logger.info("Incremental ingestion finished")
-    logger.info(
-        "Incremental ingestion summary | requests=%s received=%s "
-        "new_saved=%s duplicates=%s elapsed=%.1fs",
-        batch_count, total_received, total_new, total_dup, elapsed,
-    )
-
-    # Only update state after full success
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    updated = update_state_if_newer(today, storage_mode)
-    if updated:
-        logger.info(
-            "Incremental load completed successfully. State updated: "
-            "last_successful_date=%s", today,
-        )
-    else:
-        logger.info("Incremental load completed successfully. State left unchanged.")
+        else:
+            logger.info("Incremental load completed successfully. State left unchanged | country=%s", country)
 
 
 # --------------------------------------------------------------------------
 # Public entry point
 # --------------------------------------------------------------------------
 
-def run(mode: str, storage_mode: str = "local",
+def run(mode: str, storage_mode: str = "local", countries: list[str] | None = None,
         from_date: str | None = None, to_date: str | None = None):
     """
     Called from root main.py:
@@ -528,12 +584,13 @@ def run(mode: str, storage_mode: str = "local",
 
     CLI argument parsing lives in main.py, not here.
     """
+    countries = countries or DEFAULT_COUNTRIES
     if mode == "test":
-        run_test(storage_mode)
+        run_test(countries, storage_mode)
     elif mode == "historical":
-        run_historical(storage_mode, from_date=from_date, to_date=to_date)
+        run_historical(countries, storage_mode, from_date=from_date, to_date=to_date)
     elif mode == "incremental":
-        run_incremental(storage_mode)
+        run_incremental(countries, storage_mode)
     else:
         raise ValueError(
             f"Unknown mode {mode!r} — expected 'test', 'historical', or 'incremental'"
@@ -544,6 +601,7 @@ if __name__ == "__main__":
     run(
         mode="test",              # Run mode: test, historical, or incremental
         storage_mode="local",    # "local" for development/testing, "cloud" for S3 (PIPELINE_S3_BUCKET)
+        countries=["DE"],        # e.g. ["DE", "PL"] — ISO2, one TED query per country
         from_date="2025-01-01",  # Start date for historical mode (YYYY-MM-DD)
         to_date="2025-01-31",    # End date for historical mode (YYYY-MM-DD)
     )

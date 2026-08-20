@@ -4,9 +4,18 @@ EEA measurements transformation — column selection + station join.
 Reads every normalized measurements Parquet file (one per raw file, see
 normalization.eea.measurements), keeps only the columns that matter for
 analysis, and joins in station data — location and NUTS1/NUTS2/NUTS3 —
-from the already-enriched transformation.eea.stations output. NUTS codes
-are never recomputed here: they're a station-level property, already
-derived once from station coordinates in transformation.eea.stations.
+from the already-enriched transformation.eea.stations output for the
+*same country* as the measurement file. NUTS codes are never recomputed
+here: they're a station-level property, already derived once from
+station coordinates in transformation.eea.stations.
+
+Each normalized measurements file lives under
+data/normalized/eea/measurements/<country>/<year>/<pollutant>/ — the
+country is read directly from that path (known from ingestion's own
+per-country request, not guessed) and used to pick the matching
+data/transformed/eea/stations/<country>/station_metadata.parquet lookup
+table. Each country's station table is loaded once and reused for every
+one of its measurement files.
 
 Join key: a station's EoI code, e.g. "DEBE034". Measurements don't carry
 this as its own column — it's embedded inside `sampling_point`, e.g.
@@ -17,11 +26,15 @@ table. A measurement whose station can't be matched keeps its row (left
 join) with location/nuts1_code/nuts2_code/nuts3_code left empty, rather
 than being dropped or crashing the run.
 
+If `countries` isn't passed, every country already normalized is
+processed — read from the normalized layer's own directory structure.
+
 Reads/writes go through common.storage, so storage_mode="local" (default)
 and storage_mode="cloud" (S3) run the same logic.
 
     from transformation.eea.measurements import run
     run()
+    run(countries=["DE", "PL"])
     run(storage_mode="cloud")
 """
 import logging
@@ -41,15 +54,17 @@ logger = logging.getLogger(__name__)
 
 NORMALIZED_BASE_DIR = "data/normalized/eea/measurements"
 TRANSFORMED_BASE_DIR = "data/transformed/eea/measurements"
-STATIONS_PATH = "data/transformed/eea/stations/station_metadata.parquet"
+STATIONS_BASE_DIR = "data/transformed/eea/stations"
+STATION_METADATA_FILENAME = "station_metadata.parquet"
 
-# Names as produced by normalization.eea.measurements. `pollutant` (the
+# Names as produced by normalization.eea.measurements. `country_code` is
+# the pipeline's own request-level country, kept as-is. `pollutant` (the
 # human-readable name added from the folder path) is kept, not
 # `pollutant_code` (the raw numeric EEA code) — that's the identifier
 # actually useful for analysis.
 KEEP_COLUMNS = [
-    "sampling_point", "pollutant", "period_start", "period_end", "value",
-    "unit", "aggregation_type", "validity", "verification", "result_time",
+    "country_code", "sampling_point", "pollutant", "period_start", "period_end",
+    "value", "unit", "aggregation_type", "validity", "verification", "result_time",
 ]
 
 # Columns pulled in from the already-enriched transformed stations table.
@@ -58,14 +73,22 @@ STATION_COLUMNS = ["AirQualityStationEoICode", "AQStationName", "nuts1_code", "n
 STATION_RENAME = {"AQStationName": "location"}
 
 
-def load_stations(storage_mode: str) -> pd.DataFrame:
-    if not exists(STATIONS_PATH, storage_mode):
+def load_stations(country: str, storage_mode: str) -> pd.DataFrame:
+    path = f"{STATIONS_BASE_DIR}/{country}/{STATION_METADATA_FILENAME}"
+    if not exists(path, storage_mode):
         raise FileNotFoundError(
-            f"No transformed stations file at {STATIONS_PATH} — "
-            f"run transformation.eea.stations first."
+            f"No transformed stations file at {path} — "
+            f"run transformation.eea.stations for country={country} first."
         )
-    df = pd.read_parquet(BytesIO(read_bytes(STATIONS_PATH, storage_mode)))
+    df = pd.read_parquet(BytesIO(read_bytes(path, storage_mode)))
     return df[STATION_COLUMNS].rename(columns=STATION_RENAME)
+
+
+def extract_country_from_path(normalized_path: str) -> str:
+    """Country is the first path segment under NORMALIZED_BASE_DIR — known
+    from the normalized layer's own directory structure, not guessed."""
+    relative = normalized_path[len(NORMALIZED_BASE_DIR):].lstrip("/")
+    return relative.split("/")[0]
 
 
 def extract_station_code(sampling_point) -> str | None:
@@ -123,23 +146,42 @@ def transform_file(normalized_path: str, stations: pd.DataFrame, storage_mode: s
     return out_path
 
 
-def run(storage_mode: str = "local"):
+def discover_countries(storage_mode: str) -> list[str]:
+    """Country codes come from the normalized layer's own <country>/ subdirectories."""
+    normalized_files = list_files(NORMALIZED_BASE_DIR, storage_mode, suffix=".parquet")
+    return sorted({extract_country_from_path(path) for path in normalized_files})
+
+
+def run(storage_mode: str = "local", countries: list[str] | None = None):
     """
     Transforms every normalized measurements Parquet file found under
-    data/normalized/eea/measurements/<year>/<pollutant>/ — one output
-    file per input file, same year/pollutant layout, under
+    data/normalized/eea/measurements/<country>/<year>/<pollutant>/ — one
+    output file per input file, same layout, under
     data/transformed/eea/measurements/.
     """
-    logger.info("Starting EEA measurements transformation | storage_mode=%s", storage_mode)
-    stations = load_stations(storage_mode)
-
-    normalized_files = list_files(NORMALIZED_BASE_DIR, storage_mode, suffix=".parquet")
-    if not normalized_files:
+    countries = countries or discover_countries(storage_mode)
+    if not countries:
         logger.warning("No normalized measurements files found under %s", NORMALIZED_BASE_DIR)
         return
 
+    logger.info("Starting EEA measurements transformation | countries=%s storage_mode=%s",
+                countries, storage_mode)
+
+    normalized_files = []
+    for country in countries:
+        normalized_files.extend(list_files(f"{NORMALIZED_BASE_DIR}/{country}", storage_mode, suffix=".parquet"))
+
+    if not normalized_files:
+        logger.warning("No normalized measurements files found for countries=%s under %s",
+                       countries, NORMALIZED_BASE_DIR)
+        return
+
+    stations_cache: dict[str, pd.DataFrame] = {}
     for normalized_path in normalized_files:
-        transform_file(normalized_path, stations, storage_mode)
+        country = extract_country_from_path(normalized_path)
+        if country not in stations_cache:
+            stations_cache[country] = load_stations(country, storage_mode)
+        transform_file(normalized_path, stations_cache[country], storage_mode)
 
     logger.info("EEA measurements transformation finished | files=%s", len(normalized_files))
 
@@ -147,4 +189,5 @@ def run(storage_mode: str = "local"):
 if __name__ == "__main__":
     run(
         storage_mode="local",  # "local" for development/testing, "cloud" for S3 (PIPELINE_S3_BUCKET)
+        countries=["DE"],      # e.g. ["DE", "PL"] — omit/None to auto-discover from data/normalized/eea/measurements/
     )

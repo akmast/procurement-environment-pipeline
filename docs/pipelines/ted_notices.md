@@ -2,11 +2,14 @@
 
 ## What this pipeline gets
 
-Contract award notices (`notice-type=can-standard`) from Germany, whose
-CPV classification matches a fixed list of environment-related codes
-(waste, sewage, water, cleaning services, etc). One row per notice —
-buyer, winner, value, dates, place of performance, CPV code, and a few
-other fields we asked for.
+Contract award notices (`notice-type=can-standard`) from one or more EU
+member states, whose CPV classification matches a fixed list of
+environment-related codes (waste, sewage, water, cleaning services,
+etc). One row per notice — buyer, winner, value, dates, place of
+performance, CPV code, and a few other fields we asked for. Supports
+multiple countries in one run (`countries=["DE", "PL"]`, ISO2) — see
+`docs/pipelines/countries.md` for the mechanics shared across pipelines,
+including the ISO2/ISO3 conversion this source needs internally.
 
 ## Source
 
@@ -79,60 +82,76 @@ unlike the other three pipelines: notices are an append-only stream
 already deduplicated per-record by `publication-number`, not a
 redownloadable snapshot file — there's nothing to hash.
 
-Fetches notices in batches via `paginate_iteration()` and appends each
-batch to `data/raw/ted/notices.jsonl`, one JSON object per line, **exactly
-as TED returns it** for the fields we asked for — all ~23 language
-variants of `buyer-name`/`notice-title`, the `links` block, everything.
-No field stripping, no language trimming — that happens in normalization.
+For each requested country (ISO2, e.g. `"DE"`), converts it to the ISO3
+code TED's query language expects (`buyer-country=DEU` — see
+`docs/pipelines/countries.md` for why TED needs this conversion and the
+other sources don't), fetches notices in batches via
+`paginate_iteration()`, and appends each batch to
+`data/raw/ted/<country>/notices.jsonl`, one JSON object per line,
+**exactly as TED returns it** for the fields we asked for — all ~23
+language variants of `buyer-name`/`notice-title`, the `links` block,
+everything. No field stripping, no language trimming, no added columns —
+that happens in normalization.
 
 Two mechanisms live in ingestion, not normalization, because they're
-about *how raw data gets persisted*, not about *cleaning it*:
+about *how raw data gets persisted*, not about *cleaning it* — both
+scoped per country:
 
 - **Publication-number dedup** — before appending, we check
-  `publication-number` against everything already on disk
-  (`load_existing_publication_numbers`) so re-running `incremental` or
-  overlapping `historical` ranges doesn't duplicate raw storage. This is
-  storage idempotency, not a data-quality dedup pass.
-- **`state.json`** — `{"last_successful_run_date": "..."}`, updated only
-  after a batch finishes successfully, so `incremental` knows where to
-  resume and a failed run never silently loses progress.
+  `publication-number` against everything already on disk for that
+  country (`load_existing_publication_numbers`) so re-running
+  `incremental` or overlapping `historical` ranges doesn't duplicate raw
+  storage. This is storage idempotency, not a data-quality dedup pass.
+- **`data/raw/ted/<country>/state.json`** —
+  `{"last_successful_run_date": "..."}`, updated only after that
+  country's batch finishes successfully, so `incremental` knows where to
+  resume per country, and a failed run never silently loses progress.
 
-Three modes:
+Three modes, each looped over `countries`:
 
-- **test** — one notice, `PAGE_NUMBER` pagination, doesn't touch
-  `state.json` or `notices.jsonl`.
+- **test** — one notice per country, `PAGE_NUMBER` pagination, doesn't
+  touch `state.json` or `notices.jsonl`.
 - **historical** — full `ITERATION` pagination over an explicit date
-  range (or open-ended from a start date).
-- **incremental** — same, but the date range comes from
-  `state.json["last_successful_run_date"]`.
+  range (or open-ended from a start date), per country.
+- **incremental** — same, but each country's date range comes from its
+  own `state.json["last_successful_run_date"]`.
 
 ## Normalization — `normalization/ted/notices.py`
 
-Reads `data/raw/ted/notices.jsonl` line by line and, per notice:
+For each country (explicit, or every country found under
+`data/raw/ted/`), reads `data/raw/ted/<country>/notices.jsonl` line by
+line and, per notice:
 
 1. `strip_unwanted()` — drops the `links` block and any field with
    "email" in its name.
 2. `trim_languages()` — `buyer-name`/`notice-title` come back with ~23
    language keys; keeps only `deu` + `eng`.
+3. `add_country_code()` — stamps `country_code` (ISO2, e.g. `"DE"`) from
+   the raw file's own directory. This is a different code space from
+   TED's own `buyer-country` field (ISO3, e.g. `"DEU"`, kept untouched)
+   — see `docs/pipelines/countries.md`.
 
-Writes the result to `data/normalized/ted/notices.jsonl`, one JSON object
-per line — no filtering by country here, ingestion already scoped the
-query to Germany server-side.
+Writes the result to `data/normalized/ted/<country>/notices.jsonl`, one
+JSON object per line — no filtering by country here, ingestion already
+scoped each file's query to one country server-side.
 
 ## Data flow
 
 ```
-POST /notices/search (buyer-country=DEU AND notice-type=... AND CPV AND date range)
-        │
+POST /notices/search (buyer-country=<ISO3> AND notice-type=... AND CPV AND date range)
+        │  one query per country
         ▼
 JSON batch of up to 250 notices (full TED shape) + iterationNextToken
         │
         ▼
-append new (by publication-number) to data/raw/ted/notices.jsonl
+append new (by publication-number) to data/raw/ted/<country>/notices.jsonl
         │
         ▼
-normalization: strip links/email, trim languages
+normalization: strip links/email, trim languages, stamp country_code
         │
         ▼
-data/normalized/ted/notices.jsonl
+data/normalized/ted/<country>/notices.jsonl
 ```
+
+See `docs/pipelines/countries.md` for the `countries` parameter's shared
+mechanics across all pipelines.

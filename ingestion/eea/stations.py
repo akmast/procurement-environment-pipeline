@@ -6,6 +6,12 @@ its separate `attributes` + `geometry` shape). Country scope is applied
 server-side via the ArcGIS `where` filter — no other filtering, no
 flattening, no dropped columns, no dedup — that belongs to normalization.
 
+Supports multiple countries: one ArcGIS query per country (mirrors the
+one-request-per-pollutant pattern in ingestion.eea.measurements), each
+written to its own path — data/raw/eea/stations/<country>/stations_raw.json
+— with its own state.json, so a failed/changed fetch for one country
+never affects another's staging/hash state.
+
 Reads/writes go through common.storage, so storage_mode="local" (default,
 used for development/testing and by the __main__ example below) and
 storage_mode="cloud" (S3, via PIPELINE_S3_BUCKET) run the exact same
@@ -15,6 +21,7 @@ common/staged_write.py and docs/storage_and_incremental.md.
 
     from ingestion.eea.stations import run
     run(mode="stations")
+    run(mode="stations", countries=["DE", "PL"])
     run(mode="stations", storage_mode="cloud")
 """
 import json
@@ -52,17 +59,15 @@ STATIONS_ENDPOINT = (
     "AirQualityDownloadServiceEUMonitoringStations/MapServer/0/query"
 )
 STATIONS_PAGE_SIZE = 2000
-COUNTRY = "DE"  # server-side filter via ArcGIS `where` — CountryCode is a real schema field
+DEFAULT_COUNTRIES = ["DE"]  # preserves the pipeline's previous single-country behavior
 
 OUT_DIR = "data/raw/eea/stations"
-STATIONS_RAW_PATH = f"{OUT_DIR}/stations_raw.json"
-STATE_PATH = f"{OUT_DIR}/state.json"
 
 
-def fetch_raw_features() -> list[dict]:
+def fetch_raw_features(country: str) -> list[dict]:
     """
     Page through the ArcGIS query endpoint, filtered server-side to
-    COUNTRY via the `where` clause (standard ArcGIS REST attribute
+    `country` via the `where` clause (standard ArcGIS REST attribute
     filtering — not a post-fetch filter), and return the raw feature
     list, untouched.
     """
@@ -70,7 +75,7 @@ def fetch_raw_features() -> list[dict]:
     offset = 0
     while True:
         params = {
-            "where": f"CountryCode='{COUNTRY}'",
+            "where": f"CountryCode='{country}'",
             "outFields": "*",
             "returnGeometry": "true",
             "outSR": "4326",
@@ -81,11 +86,11 @@ def fetch_raw_features() -> list[dict]:
         resp = request_with_retry("GET", STATIONS_ENDPOINT, params=params)
         data = resp.json()
         if "error" in data:
-            raise RuntimeError(f"Stations query failed: {data['error']}")
+            raise RuntimeError(f"Stations query failed | country={country}: {data['error']}")
 
         features = data.get("features", [])
         all_features.extend(features)
-        logger.info("Station page fetched | offset=%s count=%s", offset, len(features))
+        logger.info("Station page fetched | country=%s offset=%s count=%s", country, offset, len(features))
 
         if not data.get("exceededTransferLimit") and len(features) < STATIONS_PAGE_SIZE:
             break
@@ -94,39 +99,47 @@ def fetch_raw_features() -> list[dict]:
         offset += len(features)
 
     if not all_features:
-        raise RuntimeError("Stations query returned 0 features")
+        raise RuntimeError(f"Stations query returned 0 features | country={country}")
 
     return all_features
 
 
-def run_stations(storage_mode: str):
-    logger.info("Starting EEA station metadata ingestion | mode=stations storage_mode=%s", storage_mode)
-    features = fetch_raw_features()
-    content = json.dumps(features, ensure_ascii=False).encode("utf-8")
+def run_stations(countries: list[str], storage_mode: str):
+    logger.info("Starting EEA station metadata ingestion | mode=stations countries=%s storage_mode=%s",
+                countries, storage_mode)
 
-    state = load_state(STATE_PATH, storage_mode)
-    written = stage_validate_and_write(
-        STATIONS_RAW_PATH, content, storage_mode, state, validate=is_valid_json
-    )
+    for country in countries:
+        features = fetch_raw_features(country)
+        content = json.dumps(features, ensure_ascii=False).encode("utf-8")
 
-    if not written:
-        logger.info("No update written | features=%s", len(features))
-        return
+        raw_path = f"{OUT_DIR}/{country}/stations_raw.json"
+        state_path = f"{OUT_DIR}/{country}/state.json"
+        state = load_state(state_path, storage_mode)
 
-    save_state(STATE_PATH, state, storage_mode)
-    logger.info("Raw stations saved | path=%s features=%s storage_mode=%s",
-                STATIONS_RAW_PATH, len(features), storage_mode)
+        written = stage_validate_and_write(
+            raw_path, content, storage_mode, state, validate=is_valid_json
+        )
+
+        if not written:
+            logger.info("No update written | country=%s features=%s", country, len(features))
+            continue
+
+        save_state(state_path, state, storage_mode)
+        logger.info("Raw stations saved | country=%s path=%s features=%s storage_mode=%s",
+                    country, raw_path, len(features), storage_mode)
 
 
-def run(mode: str, storage_mode: str = "local", **kwargs):
+def run(mode: str, storage_mode: str = "local", countries: list[str] | None = None, **kwargs):
+    countries = countries or DEFAULT_COUNTRIES
     if mode == "stations":
-        run_stations(storage_mode)
+        run_stations(countries, storage_mode)
     else:
         raise ValueError(f"Unknown mode {mode!r} — expected 'stations'")
 
 
 if __name__ == "__main__":
     run(
-        mode="stations",       # Only supported mode — fetches the full raw station list
-        storage_mode="local",  # "local" for development/testing, "cloud" for S3 (PIPELINE_S3_BUCKET)
+        mode="stations",             # Only supported mode — fetches the full raw station list
+        storage_mode="local",        # "local" for development/testing, "cloud" for S3 (PIPELINE_S3_BUCKET)
+        countries=["DE"],            # e.g. ["DE", "PL"] — one ArcGIS query per country
     )

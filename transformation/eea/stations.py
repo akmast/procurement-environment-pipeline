@@ -2,13 +2,23 @@
 EEA station metadata transformation — deduplication + NUTS enrichment.
 
 Reads the normalized (flattened, cleaned) station table produced by
-normalization.eea.stations, deduplicates it by station code, and adds
-nuts1_code/nuts2_code/nuts3_code derived from each station's
-(longitude, latitude) via point-in-polygon matching against the official
-NUTS3 boundaries fetched by ingestion.eea.nuts_boundaries. Deduplication
-and NUTS enrichment are both heavier, opinionated decisions (which rows
-are "the same station"; which region a coordinate falls in) — that's why
-they live here rather than in normalization.
+normalization.eea.stations — one file per country,
+data/normalized/eea/stations/<country>/station_metadata.parquet —
+deduplicates each by station code, and adds nuts1_code/nuts2_code/
+nuts3_code derived from each station's (longitude, latitude) via
+point-in-polygon matching against the official NUTS3 boundaries fetched
+by ingestion.eea.nuts_boundaries. Deduplication and NUTS enrichment are
+both heavier, opinionated decisions (which rows are "the same station";
+which region a coordinate falls in) — that's why they live here rather
+than in normalization.
+
+The NUTS3 boundaries themselves are EU-wide reference data, not scoped
+to any one country — they're loaded once per run and reused for every
+country's stations, not reloaded per country.
+
+If `countries` isn't passed, every country already normalized (i.e.
+every subdirectory under data/normalized/eea/stations/) is processed —
+read from the normalized layer's own directory structure, not guessed.
 
 NUTS1/NUTS2 are not spatially matched separately: NUTS codes are
 hierarchical by construction (a NUTS3 code's first 3/4 characters *are*
@@ -26,6 +36,7 @@ and storage_mode="cloud" (S3) run the same logic.
 
     from transformation.eea.stations import run
     run()
+    run(countries=["DE", "PL"])
     run(storage_mode="cloud")
 
 Requires: pip install shapely
@@ -44,12 +55,13 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from common.storage import exists, read_bytes, write_bytes
+from common.storage import exists, list_files, read_bytes, write_bytes
 
 logger = logging.getLogger(__name__)
 
-NORMALIZED_PATH = "data/normalized/eea/stations/station_metadata.parquet"
-STATION_METADATA_PATH = "data/transformed/eea/stations/station_metadata.parquet"
+NORMALIZED_BASE_DIR = "data/normalized/eea/stations"
+TRANSFORMED_BASE_DIR = "data/transformed/eea/stations"
+STATION_METADATA_FILENAME = "station_metadata.parquet"
 NUTS_BOUNDARIES_PATH = "data/reference/eea/nuts_boundaries/nuts3_boundaries.geojson"
 
 # GISCO's own property key for the region code on each NUTS boundary feature.
@@ -135,8 +147,7 @@ def match_nuts3_codes(df: pd.DataFrame, geometries: list, codes: list[str]) -> l
     return matches
 
 
-def enrich_with_nuts(df: pd.DataFrame, storage_mode: str) -> pd.DataFrame:
-    boundaries = load_nuts3_geometries(storage_mode)
+def enrich_with_nuts(df: pd.DataFrame, boundaries: tuple[list, list[str]] | None) -> pd.DataFrame:
     if boundaries is None:
         df["nuts1_code"] = None
         df["nuts2_code"] = None
@@ -153,28 +164,48 @@ def enrich_with_nuts(df: pd.DataFrame, storage_mode: str) -> pd.DataFrame:
     return df
 
 
-def run(storage_mode: str = "local"):
-    logger.info("Starting EEA station metadata transformation | storage_mode=%s", storage_mode)
+def discover_countries(storage_mode: str) -> list[str]:
+    """Country codes come from the normalized layer's own <country>/ subdirectories."""
+    normalized_files = list_files(NORMALIZED_BASE_DIR, storage_mode, suffix=STATION_METADATA_FILENAME)
+    return sorted({Path(p).parent.name for p in normalized_files})
 
-    if not exists(NORMALIZED_PATH, storage_mode):
-        raise FileNotFoundError(
-            f"No normalized stations file at {NORMALIZED_PATH} — "
-            f"run normalization.eea.stations first."
-        )
 
-    df = pd.read_parquet(BytesIO(read_bytes(NORMALIZED_PATH, storage_mode)))
-    df = deduplicate_stations(df)
-    df = enrich_with_nuts(df, storage_mode)
+def run(storage_mode: str = "local", countries: list[str] | None = None):
+    countries = countries or discover_countries(storage_mode)
+    if not countries:
+        logger.warning("No normalized station files found under %s", NORMALIZED_BASE_DIR)
+        return
 
-    buffer = BytesIO()
-    df.to_parquet(buffer, index=False)
-    write_bytes(STATION_METADATA_PATH, buffer.getvalue(), storage_mode)
+    logger.info("Starting EEA station metadata transformation | countries=%s storage_mode=%s",
+                countries, storage_mode)
 
-    logger.info("Transformed stations saved | path=%s rows=%s",
-                STATION_METADATA_PATH, len(df))
+    # NUTS boundaries are EU-wide reference data, not per-country — loaded
+    # once and reused for every country's stations below.
+    boundaries = load_nuts3_geometries(storage_mode)
+
+    for country in countries:
+        normalized_path = f"{NORMALIZED_BASE_DIR}/{country}/{STATION_METADATA_FILENAME}"
+        if not exists(normalized_path, storage_mode):
+            raise FileNotFoundError(
+                f"No normalized stations file at {normalized_path} — "
+                f"run normalization.eea.stations first."
+            )
+
+        df = pd.read_parquet(BytesIO(read_bytes(normalized_path, storage_mode)))
+        df = deduplicate_stations(df)
+        df = enrich_with_nuts(df, boundaries)
+
+        out_path = f"{TRANSFORMED_BASE_DIR}/{country}/{STATION_METADATA_FILENAME}"
+        buffer = BytesIO()
+        df.to_parquet(buffer, index=False)
+        write_bytes(out_path, buffer.getvalue(), storage_mode)
+
+        logger.info("Transformed stations saved | country=%s path=%s rows=%s",
+                    country, out_path, len(df))
 
 
 if __name__ == "__main__":
     run(
         storage_mode="local",  # "local" for development/testing, "cloud" for S3 (PIPELINE_S3_BUCKET)
+        countries=["DE"],      # e.g. ["DE", "PL"] — omit/None to auto-discover from data/normalized/eea/stations/
     )

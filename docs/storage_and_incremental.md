@@ -97,10 +97,13 @@ is not the only condition:
 2. **Content hash** (`common/change_tracking.py`) — SHA-256 of the raw
    bytes, compared against what's recorded for that path in a small
    `state.json` next to the data (e.g.
-   `data/raw/eea/stations/state.json`). Content only — never file name,
-   timestamp, or storage metadata (size, S3 `ETag`, `LastModified`), none
-   of which reliably say anything about whether the content itself
-   changed.
+   `data/raw/eea/stations/<country>/state.json`). Content only — never
+   file name, timestamp, or storage metadata (size, S3 `ETag`,
+   `LastModified`), none of which reliably say anything about whether the
+   content itself changed. Sources that partition raw data by country
+   (EEA stations, EEA measurements, TED notices — see
+   `docs/pipelines/countries.md`) keep one `state.json` **per country**,
+   so a hash/dedup check for one country never touches another's.
 
 Staging is always cleaned up afterwards — on `local` that's a temporary
 file under a `staging/` subtree, on `cloud` a temporary S3 key — whether

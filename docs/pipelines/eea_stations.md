@@ -10,7 +10,10 @@ measurement was taken.
 
 There is no `country` filter applied post-download anywhere in this
 pipeline — the country scope is applied once, server-side, at the
-ingestion request itself (see below).
+ingestion request itself (see below). Supports multiple countries in one
+run (`countries=["DE", "PL"]`) — see `docs/pipelines/countries.md` for
+the mechanics shared across pipelines (storage layout, server-side
+filtering, the `country_code` column).
 
 ## Source
 
@@ -70,19 +73,22 @@ Request 3 → offset=4000 → fewer than 2000 features, exceededTransferLimit=fa
 
 ## Ingestion — `ingestion/eea/stations.py`
 
-1. Pages through the endpoint above (server-side filtered to `COUNTRY`,
-   currently `"DE"`).
+For each requested country:
+
+1. Pages through the endpoint above, server-side filtered to that
+   country (`where=CountryCode='<country>'`).
 2. Concatenates every page's `features` list into one list — this is the
    raw API shape, untouched (each entry still has its own `attributes` +
    `geometry`).
 3. Writes the whole list to a staging path, reads it back, validates it's
    well-formed JSON, and only then — if it's also different from what's
-   already stored (`data/raw/eea/stations/state.json`) — promotes it to
-   `data/raw/eea/stations/stations_raw.json`. An unchanged or invalid
-   station list is left alone. Reads/writes go through `common.storage`,
-   so this runs identically for `storage_mode="local"` and `"cloud"` —
-   see `docs/storage_and_incremental.md` for staging/validation/hashing
-   and storage modes, shared across pipelines.
+   already stored (`data/raw/eea/stations/<country>/state.json`) —
+   promotes it to `data/raw/eea/stations/<country>/stations_raw.json`. An
+   unchanged or invalid station list is left alone. Reads/writes go
+   through `common.storage`, so this runs identically for
+   `storage_mode="local"` and `"cloud"` — see
+   `docs/storage_and_incremental.md` for staging/validation/hashing and
+   storage modes, shared across pipelines.
 
 Ingestion does **not** flatten geometry into columns, does not drop any
 field (including the large `PopupInfo` HTML blob), and does not
@@ -90,12 +96,17 @@ deduplicate. That's normalization's job.
 
 ## Normalization — `normalization/eea/stations.py`
 
-1. Loads `stations_raw.json`.
+For each country (explicit, or every country found under
+`data/raw/eea/stations/`):
+
+1. Loads that country's `stations_raw.json`.
 2. Flattens each feature into one row: `attributes` fields become
-   columns, plus `longitude`/`latitude` pulled out of `geometry`.
+   columns (including the raw `CountryCode` field — this dataset's own
+   country column, kept as-is), plus `longitude`/`latitude` pulled out of
+   `geometry`.
 3. Drops `PopupInfo` — it's decorative HTML for the EEA web map popup,
    not analytical data.
-4. Writes `data/normalized/eea/stations/station_metadata.parquet`.
+4. Writes `data/normalized/eea/stations/<country>/station_metadata.parquet`.
 
 Normalization only reshapes raw data into a readable table — it does not
 decide which rows are duplicates. That's a heavier, more opinionated
@@ -103,7 +114,12 @@ decision and belongs to transformation instead.
 
 ## Transformation — `transformation/eea/stations.py`
 
-1. Loads the normalized table.
+NUTS boundaries are EU-wide reference data (not per-country) and are
+loaded once per run, then reused for every country below. For each
+country (explicit, or every country found under
+`data/normalized/eea/stations/`):
+
+1. Loads that country's normalized table.
 2. Deduplicates by `AirQualityStationEoICode` (the station's EoI code —
    the join key used against measurements).
 3. **NUTS enrichment:** loads the NUTS3 boundary polygons fetched by
@@ -122,31 +138,35 @@ decision and belongs to transformation instead.
    columns instead of failing the run. All existing columns
    (`latitude`, `longitude`, and the rest of the station metadata) are
    kept unchanged.
-4. Writes `data/transformed/eea/stations/station_metadata.parquet`.
+4. Writes `data/transformed/eea/stations/<country>/station_metadata.parquet`.
 
 ## Data flow
 
 ```
-ArcGIS FeatureServer (paged, country-filtered server-side)
+ArcGIS FeatureServer (paged, country-filtered server-side, one query per country)
         │
         ▼
-ingestion.eea.stations.run(mode="stations")
+ingestion.eea.stations.run(mode="stations", countries=[...])
         │  raw features, as returned, no reshaping
         ▼
-data/raw/eea/stations/stations_raw.json
+data/raw/eea/stations/<country>/stations_raw.json
         │
         ▼
 normalization.eea.stations.run()
         │  flatten → drop PopupInfo (no dedup)
         ▼
-data/normalized/eea/stations/station_metadata.parquet
+data/normalized/eea/stations/<country>/station_metadata.parquet
         │
         ▼
 transformation.eea.stations.run()
         │  dedup by station code
         │  + NUTS enrichment (point-in-polygon match against
-        │    data/reference/eea/nuts_boundaries/nuts3_boundaries.geojson)
+        │    data/reference/eea/nuts_boundaries/nuts3_boundaries.geojson,
+        │    loaded once and reused across countries)
         ▼
-data/transformed/eea/stations/station_metadata.parquet
+data/transformed/eea/stations/<country>/station_metadata.parquet
         (adds nuts1_code / nuts2_code / nuts3_code)
 ```
+
+See `docs/pipelines/countries.md` for the `countries` parameter's shared
+mechanics across all pipelines.

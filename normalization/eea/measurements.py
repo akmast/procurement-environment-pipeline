@@ -1,22 +1,31 @@
 """
 EEA measurements normalization.
 
-Reads every raw Parquet file under data/raw/eea/measurements/<year>/<pollutant>/
-(one file at a time — ingestion.eea.measurements already scoped each file
-to a single pollutant via a separate API request per pollutant) and
-writes a normalized Parquet file with renamed, typed columns, mirroring
-the same year/pollutant layout under data/normalized/eea/measurements/.
+Reads every raw Parquet file under
+data/raw/eea/measurements/<country>/<year>/<pollutant>/ (one file at a
+time — ingestion.eea.measurements already scoped each file to a single
+country and pollutant via a separate API request per country/pollutant
+pair) and writes a normalized Parquet file with renamed, typed columns,
+mirroring the same country/year/pollutant layout under
+data/normalized/eea/measurements/.
 
 Pollutant identity comes from the raw file's own folder path — not from
 a merge on the raw numeric `Pollutant` code. That raw code is kept too
 (renamed to `pollutant_code`), in case it's useful later, but nothing in
-this module merges on it.
+this module merges on it. Country identity (`country_code`) is added the
+same way: the raw Parquet schema has no country field at all, so it's
+read from the file's own folder path — which ingestion already laid out
+per country — rather than guessed from any in-file content.
+
+If `countries` isn't passed, every country already ingested (i.e. every
+top-level subdirectory under data/raw/eea/measurements/) is processed.
 
 Reads/writes go through common.storage, so storage_mode="local" (default)
 and storage_mode="cloud" (S3) run the same logic.
 
     from normalization.eea.measurements import run
     run()
+    run(countries=["DE", "PL"])
     run(storage_mode="cloud")
 """
 import logging
@@ -96,6 +105,19 @@ def add_pollutant_from_path(df: pd.DataFrame, raw_path: str) -> pd.DataFrame:
     return df
 
 
+def add_country_from_path(df: pd.DataFrame, raw_path: str) -> pd.DataFrame:
+    """
+    Country code comes from the file's own folder path
+    (data/raw/eea/measurements/<country>/<year>/<pollutant>/*.parquet) —
+    known from the per-country API request that produced it (see
+    ingestion.eea.measurements), never guessed from in-file content.
+    """
+    relative = raw_path[len(RAW_BASE_DIR):].lstrip("/")
+    country = relative.split("/")[0]
+    df.insert(0, "country_code", country)
+    return df
+
+
 def cast_types(df: pd.DataFrame) -> pd.DataFrame:
     # Value comes back as a Decimal-backed column (parquet decimal logical
     # type) — cast to a plain float for normal arithmetic/aggregation.
@@ -115,6 +137,7 @@ def normalize_file(raw_path: str, storage_mode: str) -> str:
     df = rename_columns(df)
     df = drop_unused_columns(df)
     df = add_pollutant_from_path(df, raw_path)
+    df = add_country_from_path(df, raw_path)
     df = cast_types(df)
 
     relative = raw_path[len(RAW_BASE_DIR):].lstrip("/")
@@ -131,20 +154,35 @@ def normalize_file(raw_path: str, storage_mode: str) -> str:
     return out_path
 
 
-def run(storage_mode: str = "local"):
+def discover_countries(storage_mode: str) -> list[str]:
+    """Country codes come from the raw layer's own <country>/ subdirectories."""
+    raw_files = list_files(RAW_BASE_DIR, storage_mode, suffix=".parquet")
+    return sorted({path[len(RAW_BASE_DIR):].lstrip("/").split("/")[0] for path in raw_files})
+
+
+def run(storage_mode: str = "local", countries: list[str] | None = None):
     """
     Normalizes every raw measurements Parquet file found under
-    data/raw/eea/measurements/<year>/<pollutant>/ — one output file per
-    input file, same year/pollutant layout, under
-    data/normalized/eea/measurements/.
+    data/raw/eea/measurements/<country>/<year>/<pollutant>/ — one output
+    file per input file, same country/year/pollutant layout, under
+    data/normalized/eea/measurements/. If `countries` isn't passed, every
+    country already ingested is processed.
     """
-    raw_files = list_files(RAW_BASE_DIR, storage_mode, suffix=".parquet")
-    if not raw_files:
+    countries = countries or discover_countries(storage_mode)
+    if not countries:
         logger.warning("No raw measurements files found under %s", RAW_BASE_DIR)
         return
 
-    logger.info("Starting EEA measurements normalization | files=%s storage_mode=%s",
-                len(raw_files), storage_mode)
+    raw_files = []
+    for country in countries:
+        raw_files.extend(list_files(f"{RAW_BASE_DIR}/{country}", storage_mode, suffix=".parquet"))
+
+    if not raw_files:
+        logger.warning("No raw measurements files found for countries=%s under %s", countries, RAW_BASE_DIR)
+        return
+
+    logger.info("Starting EEA measurements normalization | countries=%s files=%s storage_mode=%s",
+                countries, len(raw_files), storage_mode)
     for raw_path in raw_files:
         normalize_file(raw_path, storage_mode)
     logger.info("EEA measurements normalization finished | files=%s", len(raw_files))
@@ -153,4 +191,5 @@ def run(storage_mode: str = "local"):
 if __name__ == "__main__":
     run(
         storage_mode="local",  # "local" for development/testing, "cloud" for S3 (PIPELINE_S3_BUCKET)
+        countries=["DE"],      # e.g. ["DE", "PL"] — omit/None to auto-discover from data/raw/eea/measurements/
     )
