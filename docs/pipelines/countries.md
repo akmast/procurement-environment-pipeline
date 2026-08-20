@@ -101,6 +101,7 @@ always used directly in the request — never applied after downloading:
 | EEA stations (ArcGIS) | `where=CountryCode='<country>'` |
 | EEA measurements | `countries: ["<country>"]` in the POST body |
 | TED notices | `buyer-country=<ISO3>` in the query string |
+| Eurostat agricultural accounts | repeated `geo=<NUTS2 code>` params, discovered per country first |
 
 Each pipeline loops over `countries` and makes **one request per
 country** (for EEA measurements, one request per country *and*
@@ -137,6 +138,10 @@ data/raw/eea/measurements/<country>/manifest.jsonl
 data/raw/eea/measurements/<country>/state.json
 data/normalized/eea/measurements/<country>/<year>/<pollutant>/*.parquet
 data/transformed/eea/measurements/<country>/<year>/<pollutant>/*.parquet
+
+data/raw/eurostat/regional_agricultural_accounts/<country>/<year>/aact_eaa01_r.json
+data/raw/eurostat/regional_agricultural_accounts/<country>/state.json
+data/normalized/eurostat/regional_agricultural_accounts/<country>/<year>/aact_eaa01_r.parquet
 
 data/raw/ted/<country>/notices.jsonl
 data/raw/ted/<country>/state.json

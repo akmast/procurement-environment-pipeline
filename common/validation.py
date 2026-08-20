@@ -57,3 +57,23 @@ def is_valid_geojson(content: bytes) -> bool:
         logger.error("GeoJSON validation failed | error=missing 'features' list")
         return False
     return True
+
+
+def is_valid_json_stat(content: bytes) -> bool:
+    """Parses as JSON and has the required top-level fields of a JSON-stat
+    2.0 dataset (Eurostat's own API response format)."""
+    try:
+        data = json.loads(content)
+    except (ValueError, UnicodeDecodeError) as exc:
+        logger.error("JSON-stat validation failed | error=%s", exc)
+        return False
+
+    if not isinstance(data, dict) or data.get("class") != "dataset":
+        logger.error("JSON-stat validation failed | error=not a JSON-stat dataset")
+        return False
+    required = {"id", "size", "dimension", "value"}
+    missing = sorted(required.difference(data))
+    if missing:
+        logger.error("JSON-stat validation failed | missing_fields=%s", missing)
+        return False
+    return True
