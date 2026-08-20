@@ -70,6 +70,12 @@ the end of results).
 
 ## Ingestion — `ingestion/ted/notices.py`
 
+Reads/writes go through `common.storage` (`storage_mode="local"`/`"cloud"`
+— see `docs/storage_and_incremental.md`). No content hashing here,
+unlike the other three pipelines: notices are an append-only stream
+already deduplicated per-record by `publication-number`, not a
+redownloadable snapshot file — there's nothing to hash.
+
 Fetches notices in batches via `paginate_iteration()` and appends each
 batch to `data/raw/ted/notices.jsonl`, one JSON object per line, **exactly
 as TED returns it** for the fields we asked for — all ~23 language

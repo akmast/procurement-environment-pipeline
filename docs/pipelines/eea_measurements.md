@@ -76,32 +76,45 @@ saved to Bronze, untouched
 
 ## Ingestion — `ingestion/eea/measurements.py`
 
-Downloads every file returned by step 1 and writes it to disk exactly as
-received — no parsing, no column selection, no filtering, no dedup. Raw
-storage is partitioned by year **and pollutant**, so the pollutant is
+Downloads every file returned by step 1 and writes it to storage exactly
+as received — no parsing, no column selection, no filtering, no dedup.
+Raw storage is partitioned by year **and pollutant**, so the pollutant is
 already known from the path, no lookup needed:
 
 ```
 data/raw/eea/measurements/<year>/<pollutant>/<original_filename>.parquet
-data/raw/eea/measurements/manifest.jsonl   — one line per downloaded file
-                                              (url, year, pollutant,
-                                              downloaded_at, size_bytes,
-                                              local_path)
+data/raw/eea/measurements/manifest.jsonl   — one line per file actually
+                                              written (url, year,
+                                              pollutant, downloaded_at,
+                                              size_bytes, storage_path)
+data/raw/eea/measurements/state.json       — content hash per file, used
+                                              to skip rewriting files
+                                              whose bytes haven't changed
 ```
 
 `<pollutant>` is exactly the string we requested (`"PM10"`, `"PM2.5"`,
 `"NO2"`, `"O3"`, `"SO2"`) — reliable by construction, since it's our own
 request parameter, not something decoded from the response.
 
+Reads/writes go through `common.storage` (`storage_mode="local"` or
+`"cloud"`) and every downloaded file is skipped if its content hash
+matches what's already stored — see
+`docs/storage_and_incremental.md` for both of those, they're shared
+across pipelines, not specific to this one.
+
 Three modes:
 
 - **test** — last 5 days, PM10 only, writes to `data/raw/eea/test/`
-  (doesn't touch the real dataset or manifest).
+  (doesn't touch the real dataset, manifest, or state).
 - **historical** — loops over `from_year..to_year` × `POLLUTANTS`, one
-  API call + one set of downloads per year/pollutant pair.
-- **refresh_current** — deletes the current year's files and manifest
-  entries, then re-downloads the current year (all pollutants) from
-  scratch.
+  API call + one set of downloads per year/pollutant pair. For an
+  explicit backfill of years outside the automatic refresh window.
+- **refresh** — re-checks every year in the current EEA reporting
+  "mutable window" (`common.reporting_window.mutable_years()` — current
+  year, plus the previous year until its own reporting deadline; see
+  `docs/storage_and_incremental.md`) × `POLLUTANTS`. No year is
+  hardcoded. Each file is only rewritten if its content actually
+  changed.
 
 ## Parquet schema (confirmed via a live file, 2026-08-19)
 
@@ -127,12 +140,16 @@ FkObservationId  (or similarly-named id column — truncated in the sample seen)
 
 ## Normalization — `normalization/eea/measurements.py`
 
-Not implemented yet — schema is being discussed with the project owner
-before writing this module (see chat), specifically: renamed/typed
-column list, how `Value`/`Unit` are handled, and whether normalized
-output stays partitioned like raw or gets combined into one dataset.
-Pollutant identity comes from the raw file's folder path, not from a
-merge on the numeric `Pollutant` code.
+Reads every raw Parquet file (via `common.storage.list_files`, so this
+works the same in `local`/`cloud`) and writes one normalized file per
+input file, mirroring the same `<year>/<pollutant>/` layout under
+`data/normalized/eea/measurements/`. Renames columns to snake_case
+(explicit map for the confirmed columns above; anything unrecognized is
+auto-converted and logged, never silently guessed), casts `value` from
+its raw `Decimal` form to `float` and the date-ish columns to
+`datetime64`, and adds a `pollutant` column read from the raw file's own
+folder path — never from a merge on `pollutant_code` (the renamed raw
+`Pollutant` column, kept for reference only).
 
 ## Data flow
 
@@ -146,5 +163,11 @@ list of Parquet file URLs (for that pollutant)
 GET each URL → Parquet bytes
         │
         ▼
-data/raw/eea/measurements/<year>/<pollutant>/*.parquet   (untouched)
+hash bytes, compare to state.json
+        │
+   ┌────┴────┐
+ same      differ/new
+   │           │
+   ▼           ▼
+ skip     data/raw/eea/measurements/<year>/<pollutant>/*.parquet (written, untouched otherwise)
 ```

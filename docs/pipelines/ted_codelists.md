@@ -50,7 +50,11 @@ expected, and we'll need to find the real filename in the GitHub folder.
 ## Ingestion — `ingestion/ted/codelists.py`
 
 For each codelist ID, downloads the XML and writes it byte-for-byte to
-`data/reference/ted/codelists/<id>.gc.xml`. No parsing happens here — a
+`data/reference/ted/codelists/<id>.gc.xml` — only if its content hash
+differs from what's already stored (`.../state.json`); GitHub rarely
+changes these, so most runs write nothing. Reads/writes go through
+`common.storage` (`storage_mode="local"`/`"cloud"`) — see
+`docs/storage_and_incremental.md`. No parsing happens here — a
 failed download (bad filename, 404) is logged and skipped, not retried
 with a guessed alternative.
 
