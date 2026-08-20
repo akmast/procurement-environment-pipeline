@@ -159,6 +159,32 @@ its raw `Decimal` form to `float` and the date-ish columns to
 folder path — never from a merge on `pollutant_code` (the renamed raw
 `Pollutant` column, kept for reference only).
 
+## Transformation — `transformation/eea/measurements.py`
+
+Reads every normalized measurements Parquet file (via
+`common.storage.list_files`, one input file → one output file, same
+`<year>/<pollutant>/` layout) and, per file:
+
+1. **Column selection** — keeps only `sampling_point`, `pollutant`,
+   `period_start`, `period_end`, `value`, `unit`, `aggregation_type`,
+   `validity`, `verification`, `result_time`. `pollutant` (the
+   human-readable name added from the folder path in normalization) is
+   kept — `pollutant_code` (the raw numeric EEA code) is dropped here,
+   its usefulness ends at normalization.
+2. **Station join** — extracts the station's EoI code from
+   `sampling_point` (e.g. `"SPO.DE_DEBE034_PM1_dataGroup2"` →
+   `"DEBE034"`, its second underscore-separated segment — confirmed
+   against real EEA sampling point values) and left-joins against
+   `data/transformed/eea/stations/station_metadata.parquet` on
+   `AirQualityStationEoICode`, bringing in `location` (the station's
+   name), `nuts1_code`, `nuts2_code`, `nuts3_code`. NUTS codes are never
+   recomputed here — they're a station-level property already derived
+   once in `transformation.eea.stations` (see
+   `docs/pipelines/eea_stations.md`). A measurement whose station code
+   doesn't match any known station keeps its row with these four fields
+   left empty, rather than being dropped or crashing the run.
+3. Writes `data/transformed/eea/measurements/<year>/<pollutant>/*.parquet`.
+
 ## Data flow
 
 ```
@@ -184,4 +210,17 @@ invalid     valid
          │           │
          ▼           ▼
        skip     data/raw/eea/measurements/<year>/<pollutant>/*.parquet (written, untouched otherwise)
+              │
+              ▼
+        normalization.eea.measurements.run()
+              │  rename, drop unused, add pollutant from path, cast types
+              ▼
+        data/normalized/eea/measurements/<year>/<pollutant>/*.parquet
+              │
+              ▼
+        transformation.eea.measurements.run()
+              │  select columns + join station location/NUTS codes
+              │  (station code extracted from sampling_point)
+              ▼
+        data/transformed/eea/measurements/<year>/<pollutant>/*.parquet
 ```
