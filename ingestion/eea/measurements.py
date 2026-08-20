@@ -19,10 +19,11 @@ storage_mode itself.
 
 `mode="refresh"` re-checks the "mutable" years (current year, and the
 previous year until its own reporting deadline — see
-common/reporting_window.py) and, per file, only rewrites storage when
-the downloaded bytes actually differ from what's already stored (see
-common/change_tracking.py) — years further in the past are not part of
-this project's incremental refresh at all; see
+common/reporting_window.py). Each downloaded file is staged, validated
+as a readable Parquet file, and only then hash-compared against what's
+already stored (see common/staged_write.py) — a file is (re)written to
+final storage only if it's both valid *and* changed. Years further in
+the past are not part of this project's incremental refresh at all; see
 docs/pipelines/eea_measurements.md for why.
 
     from ingestion.eea.measurements import run
@@ -47,9 +48,11 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from common.logging_config import setup_logging
-from common.change_tracking import has_changed, load_state, save_state
+from common.change_tracking import load_state, save_state
 from common.reporting_window import mutable_years
+from common.staged_write import stage_validate_and_write
 from common.storage import append_text, write_bytes
+from common.validation import is_valid_parquet
 
 try:
     from .http_client import request_with_retry
@@ -133,21 +136,21 @@ def append_manifest_entry(entry: dict, storage_mode: str):
 def _download_and_save(url: str, dest_dir: str, i: int, total: int, year: int,
                         pollutant: str, state: dict, storage_mode: str) -> tuple[int, bool]:
     """Returns (bytes_downloaded, was_written) — was_written is False when
-    the content hash matched what's already stored, so nothing was rewritten."""
+    validation failed or the content hash matched what's already stored,
+    so nothing was (re)written to final storage."""
     pct = int(i / total * 100)
     filename = Path(url).name or f"file_{i}.parquet"
     dest_path = f"{dest_dir}/{filename}"
     logger.info("[%s/%s] %s%% — checking %s (pollutant=%s)", i, total, pct, filename, pollutant)
 
     content = download_file(url)
-    changed, new_hash = has_changed(state, dest_path, content)
+    written = stage_validate_and_write(
+        dest_path, content, storage_mode, state, validate=is_valid_parquet
+    )
 
-    if not changed:
-        logger.info("Unchanged, skipped | %s", filename)
+    if not written:
+        logger.info("Not written (unchanged or invalid) | %s", filename)
         return len(content), False
-
-    write_bytes(dest_path, content, storage_mode)
-    state[dest_path] = {"content_hash": new_hash}
 
     append_manifest_entry({
         "url": url,

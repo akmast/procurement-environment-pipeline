@@ -97,10 +97,12 @@ data/raw/eea/measurements/state.json       — content hash per file, used
 request parameter, not something decoded from the response.
 
 Reads/writes go through `common.storage` (`storage_mode="local"` or
-`"cloud"`) and every downloaded file is skipped if its content hash
-matches what's already stored — see
-`docs/storage_and_incremental.md` for both of those, they're shared
-across pipelines, not specific to this one.
+`"cloud"`) and every downloaded file goes through staging → validation
+(must actually parse as Parquet) → content-hash compare before it's
+allowed to reach `data/raw/...` — a file is only (re)written if it's
+both valid *and* changed. See `docs/storage_and_incremental.md` for the
+full staging/validation/hashing flow and storage modes, shared across
+pipelines, not specific to this one.
 
 Three modes:
 
@@ -163,11 +165,17 @@ list of Parquet file URLs (for that pollutant)
 GET each URL → Parquet bytes
         │
         ▼
-hash bytes, compare to state.json
+write to staging, read back, validate as Parquet
         │
    ┌────┴────┐
- same      differ/new
+invalid     valid
    │           │
    ▼           ▼
- skip     data/raw/eea/measurements/<year>/<pollutant>/*.parquet (written, untouched otherwise)
+ skip    hash bytes, compare to state.json
+              │
+         ┌────┴────┐
+       same      differ/new
+         │           │
+         ▼           ▼
+       skip     data/raw/eea/measurements/<year>/<pollutant>/*.parquet (written, untouched otherwise)
 ```

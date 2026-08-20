@@ -53,30 +53,86 @@ common/storage.py
 filesystem   S3 (PIPELINE_S3_BUCKET)
 ```
 
-## Content hashing — skip a write when nothing changed
+## Staging → validate → hash-compare → promote
 
-**`common/change_tracking.py`** answers one question: *did the bytes we
-just downloaded actually change since the last run?*
+A downloaded file is never written straight to its final location.
+**`common/staged_write.py`**'s `stage_validate_and_write()` is the one
+shared write path, used identically for `local` and `cloud`:
 
-- `compute_hash(content)` — SHA-256 of the raw bytes. Content only —
-  never file name, timestamp, or storage metadata (size, S3 `ETag`,
-  `LastModified`), none of which reliably say anything about whether the
-  content itself changed.
-- The hash is kept in a small `state.json` next to the data it tracks
-  (e.g. `data/raw/eea/stations/state.json`), itself read/written through
-  `common.storage` — so state works the same way in `local` and `cloud`.
-- Before writing anything, a module compares the freshly computed hash
-  against the stored one (`has_changed()`). Same hash → skip the write
-  entirely (and skip re-triggering downstream reprocessing of that
-  file). Different hash, or nothing recorded yet → write, and record the
-  new hash.
+```
+downloaded bytes
+        │
+        ▼
+write to staging path ("staging/<final_path>")
+        │
+        ▼
+read the staged copy back
+        │
+        ▼
+validate it (is_valid_json / is_valid_parquet / is_valid_xml)
+        │
+   ┌────┴────┐
+ invalid    valid
+   │           │
+   ▼           ▼
+ stop      compare content hash to state
+ (staging   │
+  deleted)  ┌────┴────┐
+           same      differ/new
+             │           │
+             ▼           ▼
+           stop        write to final_path,
+        (staging       update state,
+         deleted)      (staging deleted)
+```
+
+Two independent gates decide the final write — **both** must pass, hash
+is not the only condition:
+
+1. **Validation** (`common/validation.py`) — confirms the staged file is
+   actually readable in its expected format (`json.loads`,
+   `pd.read_parquet`, `xml.etree.ElementTree.fromstring`). A truncated or
+   corrupted download fails here and is discarded before it ever reaches
+   final storage or `state.json`.
+2. **Content hash** (`common/change_tracking.py`) — SHA-256 of the raw
+   bytes, compared against what's recorded for that path in a small
+   `state.json` next to the data (e.g.
+   `data/raw/eea/stations/state.json`). Content only — never file name,
+   timestamp, or storage metadata (size, S3 `ETag`, `LastModified`), none
+   of which reliably say anything about whether the content itself
+   changed.
+
+Staging is always cleaned up afterwards — on `local` that's a temporary
+file under a `staging/` subtree, on `cloud` a temporary S3 key — whether
+or not the write happened. The final write is a plain overwrite of
+`final_path`; nothing pre-existing is ever deleted first, and locally
+there's no separate versioned/backup copy of the old file kept (see "S3
+Versioning" below for why `cloud` doesn't need that either).
 
 Applied to the sources that redownload a whole "snapshot" file each run
 — **EEA stations**, **EEA measurements** (per Parquet file), **TED
 codelists**. **Not** applied to TED notices: that source is an
 append-only stream, already deduplicated per-record by
-`publication-number` — there's no whole "file" to hash there, and it
-already has its own correct incremental mechanism.
+`publication-number` — there's no whole "file" to stage/validate/hash
+there, and it already has its own correct incremental mechanism.
+
+## S3 Versioning — a bucket setting, not pipeline code
+
+When a `cloud`-mode write does happen, it's a normal `put_object` to the
+same key every time (see `common/storage.py::write_bytes`) — the code
+never deletes an existing object first and never touches `VersionId`.
+
+S3 Versioning is configured **once, at the bucket level**
+(`PutBucketVersioning`), not per object and not per request — once a
+bucket has it enabled, every subsequent `PutObject` to any key
+automatically becomes the new current version while every previous
+version is preserved automatically, with no extra API calls from the
+writer. There is no such thing as "versioning for this one object" to
+enable per write. So: **no code in this project enables or manages
+versioning** — that's an infrastructure/bucket setup step (Terraform,
+console, or a one-time `aws s3api put-bucket-versioning` call), done
+once outside the pipeline, not something `stage_validate_and_write()` or
+`common/storage.py` should be trying to do on every call.
 
 ## The EEA reporting-window rule (30 September)
 

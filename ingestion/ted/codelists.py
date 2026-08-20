@@ -12,9 +12,10 @@ Source: https://github.com/OP-TED/eForms-SDK/tree/main/codelists
 
 Reads/writes go through common.storage, so storage_mode="local" (default)
 and storage_mode="cloud" (S3) run the exact same logic. Each codelist is
-only rewritten if its content hash differs from what's already stored
-(see common/change_tracking.py) — GitHub doesn't republish these often,
-so most runs should find nothing changed.
+staged, validated as well-formed XML, and only then hash-compared
+against what's already stored (see common/staged_write.py) — written to
+final storage only if both checks pass. GitHub doesn't republish these
+often, so most runs should find nothing changed.
 
     from ingestion.ted.codelists import run
     run()
@@ -35,8 +36,9 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from common.logging_config import setup_logging
-from common.change_tracking import has_changed, load_state, save_state
-from common.storage import write_bytes
+from common.change_tracking import load_state, save_state
+from common.staged_write import stage_validate_and_write
+from common.validation import is_valid_xml
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -104,14 +106,14 @@ def run(storage_mode: str = "local"):
             continue
 
         out_path = f"{OUT_DIR}/{codelist_id}.gc.xml"
-        changed, new_hash = has_changed(state, out_path, xml_bytes)
-        if not changed:
-            logger.info("Codelist unchanged, skipped | codelist=%s", codelist_id)
+        is_written = stage_validate_and_write(
+            out_path, xml_bytes, storage_mode, state, validate=is_valid_xml
+        )
+        if not is_written:
+            logger.info("Codelist not written (unchanged or invalid) | codelist=%s", codelist_id)
             results[codelist_id] = out_path
             continue
 
-        write_bytes(out_path, xml_bytes, storage_mode)
-        state[out_path] = {"content_hash": new_hash}
         written += 1
         logger.info("Codelist saved | codelist=%s size_bytes=%s path=%s",
                     codelist_id, len(xml_bytes), out_path)

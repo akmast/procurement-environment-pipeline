@@ -70,13 +70,14 @@ Request 3 → offset=4000 → fewer than 2000 features, exceededTransferLimit=fa
 2. Concatenates every page's `features` list into one list — this is the
    raw API shape, untouched (each entry still has its own `attributes` +
    `geometry`).
-3. Writes the whole list as one JSON file:
-   `data/raw/eea/stations/stations_raw.json` — only if its content hash
-   differs from what's already stored (`data/raw/eea/stations/state.json`);
-   an unchanged station list is left alone. Reads/writes go through
-   `common.storage`, so this runs identically for `storage_mode="local"`
-   and `"cloud"` — see `docs/storage_and_incremental.md` for both of
-   those, they're shared across pipelines.
+3. Writes the whole list to a staging path, reads it back, validates it's
+   well-formed JSON, and only then — if it's also different from what's
+   already stored (`data/raw/eea/stations/state.json`) — promotes it to
+   `data/raw/eea/stations/stations_raw.json`. An unchanged or invalid
+   station list is left alone. Reads/writes go through `common.storage`,
+   so this runs identically for `storage_mode="local"` and `"cloud"` —
+   see `docs/storage_and_incremental.md` for staging/validation/hashing
+   and storage modes, shared across pipelines.
 
 Ingestion does **not** flatten geometry into columns, does not drop any
 field (including the large `PopupInfo` HTML blob), and does not

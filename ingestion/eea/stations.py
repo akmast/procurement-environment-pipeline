@@ -9,7 +9,9 @@ flattening, no dropped columns, no dedup — that belongs to normalization.
 Reads/writes go through common.storage, so storage_mode="local" (default,
 used for development/testing and by the __main__ example below) and
 storage_mode="cloud" (S3, via PIPELINE_S3_BUCKET) run the exact same
-logic — see common/storage.py.
+logic — see common/storage.py. The raw JSON is staged, validated, and
+hash-compared before it's allowed to reach final storage — see
+common/staged_write.py and docs/storage_and_incremental.md.
 
     from ingestion.eea.stations import run
     run(mode="stations")
@@ -29,8 +31,9 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from common.logging_config import setup_logging
-from common.change_tracking import has_changed, load_state, save_state
-from common.storage import write_bytes
+from common.change_tracking import load_state, save_state
+from common.staged_write import stage_validate_and_write
+from common.validation import is_valid_json
 
 try:
     from .http_client import request_with_retry
@@ -102,14 +105,14 @@ def run_stations(storage_mode: str):
     content = json.dumps(features, ensure_ascii=False).encode("utf-8")
 
     state = load_state(STATE_PATH, storage_mode)
-    changed, new_hash = has_changed(state, STATIONS_RAW_PATH, content)
+    written = stage_validate_and_write(
+        STATIONS_RAW_PATH, content, storage_mode, state, validate=is_valid_json
+    )
 
-    if not changed:
-        logger.info("Stations unchanged since last run | features=%s — skipping write", len(features))
+    if not written:
+        logger.info("No update written | features=%s", len(features))
         return
 
-    write_bytes(STATIONS_RAW_PATH, content, storage_mode)
-    state[STATIONS_RAW_PATH] = {"content_hash": new_hash}
     save_state(STATE_PATH, state, storage_mode)
     logger.info("Raw stations saved | path=%s features=%s storage_mode=%s",
                 STATIONS_RAW_PATH, len(features), storage_mode)
