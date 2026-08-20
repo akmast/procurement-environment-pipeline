@@ -40,3 +40,20 @@ def is_valid_xml(content: bytes) -> bool:
     except ET.ParseError as exc:
         logger.error("XML validation failed | error=%s", exc)
         return False
+
+
+def is_valid_geojson(content: bytes) -> bool:
+    """Parses as JSON and has the shape of a GeoJSON FeatureCollection."""
+    try:
+        data = json.loads(content)
+    except (ValueError, UnicodeDecodeError) as exc:
+        logger.error("GeoJSON validation failed | error=%s", exc)
+        return False
+
+    if not isinstance(data, dict) or data.get("type") != "FeatureCollection":
+        logger.error("GeoJSON validation failed | error=not a FeatureCollection")
+        return False
+    if not isinstance(data.get("features"), list):
+        logger.error("GeoJSON validation failed | error=missing 'features' list")
+        return False
+    return True

@@ -1,12 +1,25 @@
 """
-EEA station metadata transformation — deduplication.
+EEA station metadata transformation — deduplication + NUTS enrichment.
 
 Reads the normalized (flattened, cleaned) station table produced by
-normalization.eea.stations and deduplicates it by station code. Kept
-separate from normalization because normalization's job is reshaping raw
-data into readable structure — deciding which rows are "the same
-station" and should collapse into one is a heavier, more opinionated
-step that belongs here.
+normalization.eea.stations, deduplicates it by station code, and adds
+nuts1_code/nuts2_code/nuts3_code derived from each station's
+(longitude, latitude) via point-in-polygon matching against the official
+NUTS3 boundaries fetched by ingestion.eea.nuts_boundaries. Deduplication
+and NUTS enrichment are both heavier, opinionated decisions (which rows
+are "the same station"; which region a coordinate falls in) — that's why
+they live here rather than in normalization.
+
+NUTS1/NUTS2 are not spatially matched separately: NUTS codes are
+hierarchical by construction (a NUTS3 code's first 3/4 characters *are*
+its NUTS1/NUTS2 code, e.g. "DE712" -> NUTS2 "DE71" -> NUTS1 "DE7"), so
+matching against NUTS3 polygons alone is enough to derive all three
+levels. See docs/pipelines/eea_nuts_boundaries.md for where the boundary
+data comes from and how the spatial join works.
+
+A station with a missing coordinate, or a coordinate that doesn't fall
+inside any known NUTS3 polygon (e.g. just outside a coastline), gets
+nuts1_code/nuts2_code/nuts3_code = None rather than failing the run.
 
 Reads/writes go through common.storage, so storage_mode="local" (default)
 and storage_mode="cloud" (S3) run the same logic.
@@ -14,13 +27,18 @@ and storage_mode="cloud" (S3) run the same logic.
     from transformation.eea.stations import run
     run()
     run(storage_mode="cloud")
+
+Requires: pip install shapely
 """
+import json
 import logging
 import sys
 from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
+from shapely.geometry import Point, shape
+from shapely.strtree import STRtree
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
@@ -32,12 +50,106 @@ logger = logging.getLogger(__name__)
 
 NORMALIZED_PATH = "data/normalized/eea/stations/station_metadata.parquet"
 STATION_METADATA_PATH = "data/transformed/eea/stations/station_metadata.parquet"
+NUTS_BOUNDARIES_PATH = "data/reference/eea/nuts_boundaries/nuts3_boundaries.geojson"
+
+# GISCO's own property key for the region code on each NUTS boundary feature.
+NUTS_ID_PROPERTY = "NUTS_ID"
 
 
 def deduplicate_stations(df: pd.DataFrame) -> pd.DataFrame:
     before = len(df)
     df = df.drop_duplicates(subset=["AirQualityStationEoICode"])
     logger.info("Deduplicated stations | %s -> %s rows", before, len(df))
+    return df
+
+
+def load_nuts3_geometries(storage_mode: str) -> tuple[list, list[str]] | None:
+    """
+    Returns (geometries, nuts3_codes) — parallel lists, same order — or
+    None if the boundaries reference file isn't available. Missing
+    boundaries is treated as a soft failure: enrichment is skipped and
+    every station gets empty NUTS fields, the pipeline doesn't crash.
+    """
+    if not exists(NUTS_BOUNDARIES_PATH, storage_mode):
+        logger.warning(
+            "NUTS boundaries file not found at %s — run "
+            "ingestion.eea.nuts_boundaries first; NUTS fields will be left empty",
+            NUTS_BOUNDARIES_PATH,
+        )
+        return None
+
+    geojson = json.loads(read_bytes(NUTS_BOUNDARIES_PATH, storage_mode).decode("utf-8"))
+
+    geometries = []
+    codes = []
+    skipped = 0
+    for feature in geojson.get("features", []):
+        properties = feature.get("properties") or {}
+        code = properties.get(NUTS_ID_PROPERTY)
+        geometry = feature.get("geometry")
+        if not code or not geometry:
+            skipped += 1
+            continue
+        try:
+            geometries.append(shape(geometry))
+            codes.append(code)
+        except Exception as exc:
+            logger.warning("Skipped unparseable NUTS3 geometry | code=%s error=%s", code, exc)
+            skipped += 1
+
+    logger.info("Loaded NUTS3 boundaries | polygons=%s skipped=%s", len(codes), skipped)
+    return geometries, codes
+
+
+def match_nuts3_codes(df: pd.DataFrame, geometries: list, codes: list[str]) -> list[str | None]:
+    """
+    For each station, finds the NUTS3 polygon containing its
+    (longitude, latitude) point. STRtree.query() is a fast bounding-box
+    pre-filter — it returns candidate polygon indices whose *envelope*
+    overlaps the point, not confirmed matches, so each candidate is still
+    checked with an exact .contains() test before being accepted.
+    """
+    tree = STRtree(geometries)
+    matches: list[str | None] = []
+    unmatched = 0
+
+    for longitude, latitude in zip(df["longitude"], df["latitude"]):
+        if pd.isna(longitude) or pd.isna(latitude):
+            matches.append(None)
+            unmatched += 1
+            continue
+
+        point = Point(longitude, latitude)
+        match = None
+        for idx in tree.query(point):
+            if geometries[idx].contains(point):
+                match = codes[idx]
+                break
+
+        if match is None:
+            unmatched += 1
+        matches.append(match)
+
+    logger.info("NUTS3 matching finished | matched=%s unmatched=%s",
+                len(matches) - unmatched, unmatched)
+    return matches
+
+
+def enrich_with_nuts(df: pd.DataFrame, storage_mode: str) -> pd.DataFrame:
+    boundaries = load_nuts3_geometries(storage_mode)
+    if boundaries is None:
+        df["nuts1_code"] = None
+        df["nuts2_code"] = None
+        df["nuts3_code"] = None
+        return df
+
+    geometries, codes = boundaries
+    nuts3_codes = match_nuts3_codes(df, geometries, codes)
+
+    df["nuts3_code"] = nuts3_codes
+    # NUTS codes nest by prefix: NUTS3 "DE712" -> NUTS2 "DE71" -> NUTS1 "DE7".
+    df["nuts2_code"] = [code[:4] if code else None for code in nuts3_codes]
+    df["nuts1_code"] = [code[:3] if code else None for code in nuts3_codes]
     return df
 
 
@@ -52,6 +164,7 @@ def run(storage_mode: str = "local"):
 
     df = pd.read_parquet(BytesIO(read_bytes(NORMALIZED_PATH, storage_mode)))
     df = deduplicate_stations(df)
+    df = enrich_with_nuts(df, storage_mode)
 
     buffer = BytesIO()
     df.to_parquet(buffer, index=False)

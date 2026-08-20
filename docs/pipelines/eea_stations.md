@@ -106,7 +106,23 @@ decision and belongs to transformation instead.
 1. Loads the normalized table.
 2. Deduplicates by `AirQualityStationEoICode` (the station's EoI code —
    the join key used against measurements).
-3. Writes `data/transformed/eea/stations/station_metadata.parquet`.
+3. **NUTS enrichment:** loads the NUTS3 boundary polygons fetched by
+   `ingestion.eea.nuts_boundaries` (see
+   `docs/pipelines/eea_nuts_boundaries.md`) and, for each station, finds
+   which NUTS3 polygon contains its `(longitude, latitude)` point —
+   using `shapely.strtree.STRtree` as a fast bounding-box pre-filter,
+   then an exact `.contains()` test on each candidate. Both coordinates
+   and boundaries are in WGS84 (EPSG:4326), so no reprojection is
+   needed. Adds three new columns: `nuts3_code` (the matched region,
+   e.g. `"DE712"`), and `nuts2_code`/`nuts1_code` derived by slicing
+   that code's prefix (`"DE71"`, `"DE7"`) rather than a second spatial
+   lookup — NUTS codes nest by construction. A station with a missing
+   coordinate, an unmatched coordinate (outside every known polygon), or
+   a missing boundaries reference file gets `None` in all three NUTS
+   columns instead of failing the run. All existing columns
+   (`latitude`, `longitude`, and the rest of the station metadata) are
+   kept unchanged.
+4. Writes `data/transformed/eea/stations/station_metadata.parquet`.
 
 ## Data flow
 
@@ -128,6 +144,9 @@ data/normalized/eea/stations/station_metadata.parquet
         ▼
 transformation.eea.stations.run()
         │  dedup by station code
+        │  + NUTS enrichment (point-in-polygon match against
+        │    data/reference/eea/nuts_boundaries/nuts3_boundaries.geojson)
         ▼
 data/transformed/eea/stations/station_metadata.parquet
+        (adds nuts1_code / nuts2_code / nuts3_code)
 ```
