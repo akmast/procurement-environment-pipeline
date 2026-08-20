@@ -77,7 +77,8 @@ data/transformed/eea/measurements/<country>/<year>/<pollutant>/*.parquet
 
 data/raw/ted/<country>/notices.jsonl
 data/raw/ted/<country>/state.json
-data/normalized/ted/<country>/notices.jsonl
+data/normalized/ted/<country>/notices.parquet
+data/transformed/ted/<country>/notices.parquet
 ```
 
 **Not** country-partitioned: TED codelists and NUTS boundaries. Both are
@@ -98,7 +99,7 @@ already laid out per country) — never guessed from in-file content:
 - **EEA measurements** — `normalization.eea.measurements.add_country_from_path()`
   stamps `country_code` from the raw file's `<country>/<year>/<pollutant>/`
   folder.
-- **TED notices** — `normalization.ted.notices.add_country_code()` stamps
+- **TED notices** — `normalization.ted.notices.flatten_notice()` stamps
   `country_code` from the raw file's `<country>/` folder. This is
   deliberately kept separate from TED's own `buyer-country` field
   (ISO3, e.g. `"DEU"`) — different code space, left untouched.

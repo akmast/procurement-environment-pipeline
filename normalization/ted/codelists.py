@@ -2,7 +2,19 @@
 TED reference codelists normalization.
 
 Reads the raw Genericode XML files saved by ingestion.ted.codelists and
-parses each into a flat, joinable list of {column: value} rows.
+parses each into a flat, joinable table, written to Parquet — the same
+format as every other normalized dataset in this project, and directly
+loadable by transformation.ted.notices for its code -> label joins
+(notice_type, buyer_country, total_value_currency,
+winner_selection_status, non_award_justification, nuts, classification
+CPV codes).
+
+Each row keeps every column Genericode provides for that code — the
+"code" column itself, plus a generic "Name" column and one
+"<lang>_label" column per language (confirmed live: bul_label,
+spa_label, ..., deu_label, eng_label, ...). Normalization doesn't pick a
+single label here — which one to prefer is an opinionated choice left to
+whatever joins against it (see transformation.ted.notices).
 
 Reads/writes go through common.storage, so storage_mode="local" (default)
 and storage_mode="cloud" (S3) run the same logic.
@@ -11,17 +23,19 @@ and storage_mode="cloud" (S3) run the same logic.
     run()
     run(storage_mode="cloud")
 """
-import json
 import logging
 import sys
 import xml.etree.ElementTree as ET
+from io import BytesIO
 from pathlib import Path
+
+import pandas as pd
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from common.storage import list_files, read_bytes, write_text
+from common.storage import list_files, read_bytes, write_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -81,10 +95,14 @@ def run(storage_mode: str = "local"):
             )
             continue
 
-        out_path = f"{OUT_DIR}/{codelist_id}.json"
-        write_text(out_path, json.dumps(rows, ensure_ascii=False, indent=2), storage_mode)
-        logger.info("Codelist normalized | codelist=%s rows=%s path=%s",
-                    codelist_id, len(rows), out_path)
+        df = pd.DataFrame(rows)
+        out_path = f"{OUT_DIR}/{codelist_id}.parquet"
+        buffer = BytesIO()
+        df.to_parquet(buffer, index=False)
+        write_bytes(out_path, buffer.getvalue(), storage_mode)
+
+        logger.info("Codelist normalized | codelist=%s rows=%s columns=%s path=%s",
+                    codelist_id, len(df), list(df.columns), out_path)
         results[codelist_id] = out_path
 
     logger.info("Codelist normalization finished | saved=%s", len(results))

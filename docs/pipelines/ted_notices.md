@@ -118,22 +118,96 @@ Three modes, each looped over `countries`:
 
 ## Normalization — `normalization/ted/notices.py`
 
+Turns the raw JSONL into a compact analytical table — one row per
+notice, typed columns, no nested structure — written to
+`data/normalized/ted/<country>/notices.parquet`. This is a real reshape,
+not a straight copy: the real API response (confirmed live, 2026-08-20)
+turned out to have a few quirks that had to be handled explicitly rather
+than assumed from the request `FIELDS` list:
+
+- **Fields missing from a notice are omitted entirely**, never present
+  as `null` — every field is read defensively.
+- **Almost every "scalar" field is still wrapped in a single-element
+  list** (e.g. `"buyer-country": ["DEU"]`, `"total-value-cur": ["EUR"]`)
+  — unwrapped to a plain value (`unwrap_scalar()`).
+- **Multilingual fields** (`buyer-name`, `winner-name`, `notice-title`,
+  `buyer-city`) come back as `{lang: [value, ...]}`. Resolved to one
+  string per notice via `resolve_language_field()`, preferring German →
+  English → TED's language-neutral `"mul"` tag (seen used for
+  `buyer-city`, e.g. `{"mul": ["Nürnberg"]}` — city names usually
+  aren't translated) → whatever's left.
+- **`place-of-performance` mixes NUTS codes and ISO3 country codes in
+  one flat list**, e.g. `["DE236", "DEU"]` — not `"BT-5071-Lot"`, the
+  business term actually requested, which never appears as its own key
+  in real responses. Split apart by shape in
+  `split_place_of_performance()`: a NUTS code is 2 letters + 1-3 digits,
+  a bare ISO3 country code is 3 letters with no digit.
+- **`classification-cpv` can repeat the same code** (one real notice
+  listed each of 4 codes twice) — deduplicated, order preserved.
+
 For each country (explicit, or every country found under
-`data/raw/ted/`), reads `data/raw/ted/<country>/notices.jsonl` line by
-line and, per notice:
+`data/raw/ted/`), every notice becomes one row with these columns:
 
-1. `strip_unwanted()` — drops the `links` block and any field with
-   "email" in its name.
-2. `trim_languages()` — `buyer-name`/`notice-title` come back with ~23
-   language keys; keeps only `deu` + `eng`.
-3. `add_country_code()` — stamps `country_code` (ISO2, e.g. `"DE"`) from
-   the raw file's own directory. This is a different code space from
-   TED's own `buyer-country` field (ISO3, e.g. `"DEU"`, kept untouched)
-   — see `docs/pipelines/countries.md`.
+```
+country_code, publication_number, notice_type, notice_title,
+publication_date, contract_conclusion_date,
+buyer_name, buyer_country, buyer_city, buyer_post_code,
+winner_name, winner_selection_status,
+total_value, total_value_currency,
+classification_cpv,               # list[str], deduplicated
+non_award_justification,          # str
+green_procurement_criteria,       # list[str], deduplicated (one entry per lot in the raw data)
+nuts, nuts1, nuts2, nuts3,         # primary NUTS code + its levels by prefix
+nuts_codes,                        # list[str] — every NUTS code found, not just the primary one
+place_of_performance_country       # list[str] — the ISO3 entries split out of place-of-performance
+```
 
-Writes the result to `data/normalized/ted/<country>/notices.jsonl`, one
-JSON object per line — no filtering by country here, ingestion already
-scoped each file's query to one country server-side.
+`nuts`/`nuts1`/`nuts2`/`nuts3` come from the **first** NUTS code found in
+`place-of-performance` (nesting by prefix, same convention as
+`transformation.eea.stations` — see `docs/pipelines/eea_stations.md`);
+the full set is kept in `nuts_codes` so a multi-lot notice spanning
+several regions doesn't lose that information. `country_code` is this
+project's own ISO2 code (from the file's own directory) — a different
+code space from `buyer_country` (TED's own ISO3 field, kept untouched).
+
+Entirely dropped: `links` (all `pdf`/`html`/`htmlDirect`/`xml` blocks —
+technical URLs, not analytical data).
+
+Three fields needed a real populated sample to pin down (confirmed
+2026-08-20):
+
+- `total_value` — a bare float (e.g. `6054986.63`), unlike almost every
+  other field, **not** list-wrapped.
+- `non_award_justification` — a single-element list wrapping one
+  controlled code (e.g. `["ins-fund"]`), same shape as
+  `winner_selection_status`.
+- `green_procurement_criteria` — a genuine **multi-element** list (e.g.
+  `["other", "other"]`), one entry per lot the criterion applies to, so
+  the same code can repeat. Deduplicated the same way as
+  `classification_cpv` — this table is per-notice, not per-lot, so the
+  set of distinct criteria is what matters at this grain.
+
+## Transformation — `transformation/ted/notices.py`
+
+1. **Dedup** by `publication_number` — a defensive safety net (ingestion
+   already dedups on write; this is the same "cheap deterministic
+   guarantee" reasoning as `transformation.eea.stations` re-deduping
+   station codes).
+2. **Codelist labeling** — joins in human-readable labels from the
+   normalized TED codelists (see `docs/pipelines/ted_codelists.md`) for
+   every coded field: `notice_type`, `buyer_country`,
+   `total_value_currency`, `winner_selection_status`,
+   `non_award_justification`, `nuts` (each gets a `..._label` column),
+   plus `classification_cpv_labels` — one label per code in
+   `classification_cpv`, same order, `None` for any code missing from
+   the CPV codelist. Label preference per codelist row: `deu_label` →
+   `eng_label` → `Name` → the code itself. A codelist that failed to
+   load, or a code with no match, produces a `null` label rather than
+   failing the run — labeling is enrichment, not a required field. Each
+   codelist is loaded once per run and reused across every country
+   (codelists are EU-wide reference data, not country-scoped).
+
+Writes `data/transformed/ted/<country>/notices.parquet`.
 
 ## Data flow
 
@@ -147,11 +221,21 @@ JSON batch of up to 250 notices (full TED shape) + iterationNextToken
 append new (by publication-number) to data/raw/ted/<country>/notices.jsonl
         │
         ▼
-normalization: strip links/email, trim languages, stamp country_code
+normalization.ted.notices.run()
+        │  unwrap list-wrapped scalars, resolve multilingual fields,
+        │  split place-of-performance into NUTS + country, dedupe CPV,
+        │  parse dates, drop links, stamp country_code
+        ▼
+data/normalized/ted/<country>/notices.parquet
         │
         ▼
-data/normalized/ted/<country>/notices.jsonl
+transformation.ted.notices.run()
+        │  dedup by publication_number
+        │  + join code -> label from normalized TED codelists
+        ▼
+data/transformed/ted/<country>/notices.parquet
 ```
 
 See `docs/pipelines/countries.md` for the `countries` parameter's shared
-mechanics across all pipelines.
+mechanics across all pipelines, and `docs/pipelines/ted_codelists.md`
+for the codelists this transformation joins against.

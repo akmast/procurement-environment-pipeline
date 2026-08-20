@@ -64,8 +64,28 @@ retried with a guessed alternative.
 ## Normalization — `normalization/ted/codelists.py`
 
 For each raw `.gc.xml` file, parses the Genericode structure into a flat
-list of `{column: value}` rows (`parse_genericode()`) and writes
-`data/normalized/ted/codelists/<id>.json`.
+table (`parse_genericode()`) and writes
+`data/normalized/ted/codelists/<id>.parquet` — Parquet rather than JSON,
+matching every other normalized dataset in this project and directly
+loadable by `pandas.read_parquet` for joins. Each row keeps every column
+Genericode provides for that code: `code` itself, a generic `Name`
+column, and one `<lang>_label` column per language (confirmed live:
+`bul_label`, `spa_label`, ..., `deu_label`, `eng_label`, ...).
+Normalization doesn't pick a single label — which one to prefer is an
+opinionated choice, left to whatever joins against it.
+
+## Consumer — `transformation.ted.notices`
+
+Joins `code` against the coded columns in normalized TED notices
+(`notice_type`, `buyer_country`, `total_value_currency`,
+`winner_selection_status`, `non_award_justification`, `nuts`, and each
+code inside `classification_cpv`) to add human-readable `..._label`
+columns, preferring `deu_label` → `eng_label` → `Name` → the code
+itself. See `docs/pipelines/ted_notices.md` for the full join. This is
+the reason codelists get their own normalization stage at all — they
+exist to make that join possible; there's no separate transformation
+stage for codelists themselves; they're static lookup tables with
+nothing to dedup or enrich on their own.
 
 ## Data flow
 
@@ -76,8 +96,15 @@ GET raw.githubusercontent.com/.../<codelist>.gc
 data/reference/ted/codelists/<id>.gc.xml   (raw XML, untouched)
         │
         ▼
-normalization: parse Genericode → flat rows
+normalization: parse Genericode → flat table
         │
         ▼
-data/normalized/ted/codelists/<id>.json
+data/normalized/ted/codelists/<id>.parquet
+        │
+        ▼
+transformation.ted.notices: code -> label join
+        │
+        ▼
+data/transformed/ted/<country>/notices.parquet
+        (adds notice_type_label, buyer_country_label, ..., classification_cpv_labels)
 ```
