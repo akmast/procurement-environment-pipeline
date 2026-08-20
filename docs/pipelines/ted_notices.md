@@ -200,17 +200,44 @@ Three fields needed a real populated sample to pin down (confirmed
    station codes).
 2. **Codelist labeling** — joins in human-readable labels from the
    normalized TED codelists (see `docs/pipelines/ted_codelists.md`) for
-   every coded field: `notice_type`, `buyer_country`,
-   `total_value_currency`, `winner_selection_status`,
-   `non_award_justification`, `nuts` (each gets a `..._label` column),
-   plus `classification_cpv_labels` — one label per code in
-   `classification_cpv`, same order, `None` for any code missing from
-   the CPV codelist. Label preference per codelist row: `deu_label` →
-   `eng_label` → `Name` → the code itself. A codelist that failed to
-   load, or a code with no match, produces a `null` label rather than
-   failing the run — labeling is enrichment, not a required field. Each
-   codelist is loaded once per run and reused across every country
-   (codelists are EU-wide reference data, not country-scoped).
+   every coded field that's actually useful to interpret, without
+   replacing the original code — both are kept:
+   - `notice_type` → `notice_type_label`
+   - `buyer_country` → `buyer_country_label`
+   - `total_value_currency` → `total_value_currency_label`
+   - `winner_selection_status` → `winner_selection_status_label`
+   - `non_award_justification` → `non_award_justification_label`
+   - `nuts`, `nuts1`, `nuts2`, `nuts3` → `nuts_label`, `nuts1_label`,
+     `nuts2_label`, `nuts3_label` — all four resolved from the single
+     `nuts` codelist, which lists every NUTS level in one table, so no
+     separate codelist is needed per granularity.
+   - `classification_cpv` → `classification_cpv_labels` — one label per
+     code, same order, `None` for any code missing from the CPV
+     codelist.
+   - `place_of_performance_country` → `place_of_performance_country_labels`
+     — same list-join pattern, against the `country` codelist (this is
+     the place-of-performance country, not `buyer_country` — a
+     cross-border notice can have both, e.g. a German buyer with
+     performance partly in Poland).
+
+   Label preference per codelist row: `deu_label` → `eng_label` →
+   `Name` → the code itself. A codelist that failed to load, or a code
+   with no match, produces a `null` label rather than failing the run —
+   labeling is enrichment, not a required field. Each codelist is
+   loaded once per run and reused across every country (codelists are
+   EU-wide reference data, not country-scoped).
+
+   **Codelist coverage** — not every coded-looking column gets a join.
+   `green_procurement_criteria` is a controlled-vocabulary-looking field
+   (values observed so far: `"other"`) but no matching TED codelist is
+   currently downloaded by `ingestion.ted.codelists` — it's kept as raw
+   codes, unlabeled. The eForms SDK likely has one (business term BT-06,
+   "Strategic Procurement" — a plausible codelist id is
+   `strategic-procurement`, unconfirmed — see
+   https://github.com/OP-TED/eForms-SDK/tree/main/codelists to find the
+   real filename, the same way `nuts.gc` was confirmed). If this field
+   turns out to matter for analysis, add it to `CODELISTS` in
+   `ingestion/ted/codelists.py` and a join to `CODELIST_JOINS` here.
 
 Writes `data/transformed/ted/<country>/notices.parquet`.
 

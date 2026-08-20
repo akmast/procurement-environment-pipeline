@@ -10,12 +10,17 @@ normalization.ted.notices) and:
    AirQualityStationEoICode: a cheap, deterministic guarantee that
    doesn't rely on every upstream step staying bug-free).
 2. Joins in human-readable labels from the normalized TED codelists
-   (see normalization.ted.codelists) for every coded field: notice_type,
-   buyer_country, total_value_currency, winner_selection_status,
-   non_award_justification, nuts, and each code in classification_cpv.
-   This is the reason TED codelists get their own normalization stage —
-   they exist to make these joins possible. Each codelist is loaded once
-   per run and reused for every country.
+   (see normalization.ted.codelists) for every coded field that's
+   actually useful to interpret: notice_type, buyer_country,
+   total_value_currency, winner_selection_status,
+   non_award_justification, nuts/nuts1/nuts2/nuts3 (all four resolved
+   from the single "nuts" codelist, which lists every NUTS level), and
+   each code in classification_cpv / place_of_performance_country. This
+   is the reason TED codelists get their own normalization stage — they
+   exist to make these joins possible. Each codelist is loaded once per
+   run and reused for every country. Not every coded field gets a join —
+   see the "codelist coverage" note in docs/pipelines/ted_notices.md for
+   which ones don't have a downloaded codelist to join against yet.
 
 Label preference per codelist row: deu_label (matches this project's
 language convention elsewhere) -> eng_label -> Name -> the code itself
@@ -55,17 +60,29 @@ TRANSFORMED_BASE_DIR = "data/transformed/ted"
 NOTICES_FILENAME = "notices.parquet"
 CODELISTS_BASE_DIR = "data/normalized/ted/codelists"
 
-# codelist_id -> (source column in notices, output label column)
-CODELIST_JOINS = {
-    "notice-type": ("notice_type", "notice_type_label"),
-    "country": ("buyer_country", "buyer_country_label"),
-    "currency": ("total_value_currency", "total_value_currency_label"),
-    "winner-selection-status": ("winner_selection_status", "winner_selection_status_label"),
-    "non-award-justification": ("non_award_justification", "non_award_justification_label"),
-    "nuts": ("nuts", "nuts_label"),
-}
-# classification_cpv is a list column, not a single code — labeled separately (see label_cpv_codes).
+# (source column in notices, codelist_id to join against, output label column).
+# A list, not a dict, because several rows share the same codelist:
+# nuts.gc lists all NUTS levels (0-3) in one table, so the same lookup
+# resolves nuts/nuts1/nuts2/nuts3 — genuinely useful for region-level
+# aggregation at any granularity, not added just because the codelist
+# exists.
+CODELIST_JOINS = [
+    ("notice_type", "notice-type", "notice_type_label"),
+    ("buyer_country", "country", "buyer_country_label"),
+    ("total_value_currency", "currency", "total_value_currency_label"),
+    ("winner_selection_status", "winner-selection-status", "winner_selection_status_label"),
+    ("non_award_justification", "non-award-justification", "non_award_justification_label"),
+    ("nuts", "nuts", "nuts_label"),
+    ("nuts1", "nuts", "nuts1_label"),
+    ("nuts2", "nuts", "nuts2_label"),
+    ("nuts3", "nuts", "nuts3_label"),
+]
+
+# List-column joins (classification_cpv, place_of_performance_country) —
+# one label per code, same order, handled separately from the
+# single-code joins above (see add_codelist_labels).
 CPV_CODELIST_ID = "cpv"
+PLACE_COUNTRY_CODELIST_ID = "country"
 
 # Preference order for which of a codelist row's columns to use as its
 # human-readable label — not every codelist is guaranteed to have every
@@ -102,7 +119,8 @@ def build_codelist_lookup(codelist_id: str, storage_mode: str) -> dict:
 
 
 def load_codelist_lookups(storage_mode: str) -> dict[str, dict]:
-    codelist_ids = list(CODELIST_JOINS) + [CPV_CODELIST_ID]
+    codelist_ids = {codelist_id for _, codelist_id, _ in CODELIST_JOINS}
+    codelist_ids |= {CPV_CODELIST_ID, PLACE_COUNTRY_CODELIST_ID}
     return {codelist_id: build_codelist_lookup(codelist_id, storage_mode) for codelist_id in codelist_ids}
 
 
@@ -113,14 +131,22 @@ def deduplicate_notices(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _label_list_column(series: pd.Series, lookup: dict) -> pd.Series:
+    return series.apply(
+        lambda codes: [lookup.get(code) for code in codes]
+        if isinstance(codes, (list, np.ndarray)) else []
+    )
+
+
 def add_codelist_labels(df: pd.DataFrame, lookups: dict[str, dict]) -> pd.DataFrame:
-    for codelist_id, (source_column, label_column) in CODELIST_JOINS.items():
+    for source_column, codelist_id, label_column in CODELIST_JOINS:
         df[label_column] = df[source_column].map(lookups.get(codelist_id, {}))
 
-    cpv_lookup = lookups.get(CPV_CODELIST_ID, {})
-    df["classification_cpv_labels"] = df["classification_cpv"].apply(
-        lambda codes: [cpv_lookup.get(code) for code in codes]
-        if isinstance(codes, (list, np.ndarray)) else []
+    df["classification_cpv_labels"] = _label_list_column(
+        df["classification_cpv"], lookups.get(CPV_CODELIST_ID, {})
+    )
+    df["place_of_performance_country_labels"] = _label_list_column(
+        df["place_of_performance_country"], lookups.get(PLACE_COUNTRY_CODELIST_ID, {})
     )
     return df
 
