@@ -10,7 +10,8 @@ that publishes as a redownloadable, revisable yearly snapshot rather
 than an immutable stream of published records (see
 docs/pipelines/eea_measurements.md). It is not meant to be reused for
 TED, whose notices are treated as immutable once published and use their
-own publication-number-based incremental logic instead.
+own publication-number-based refresh logic instead
+(ingestion.ted.notices's own "refresh" mode).
 
     from common.reporting_window import mutable_years, reporting_deadline
 """

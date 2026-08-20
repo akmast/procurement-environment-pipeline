@@ -1,14 +1,14 @@
 """
-TED API v3 ingestion module — test / historical / incremental modes.
+TED API v3 ingestion module — test / historical / refresh modes.
 
 Not a standalone entry point — called from root main.py:
 
     from ingestion.ted.notices import run as run_ted_ingestion
     run_ted_ingestion(mode="test")
     run_ted_ingestion(mode="historical", from_date="2025-01-01", to_date="2025-01-31")
-    run_ted_ingestion(mode="incremental")
-    run_ted_ingestion(mode="incremental", countries=["DE", "PL"])
-    run_ted_ingestion(mode="incremental", storage_mode="cloud")
+    run_ted_ingestion(mode="refresh")
+    run_ted_ingestion(mode="refresh", countries=["DE", "PL"])
+    run_ted_ingestion(mode="refresh", storage_mode="cloud")
 
 Saves notices exactly as TED returns them for the requested FIELDS — no
 field stripping, no language trimming, no added columns. That JSON
@@ -29,7 +29,7 @@ building the query string via EU_ISO2_TO_ISO3 below; storage paths and
 the country_code column added in normalization stay ISO2.
 
 The publication-number dedup here is a storage/idempotency concern, not a
-data-cleaning one: it stops repeated incremental runs from re-appending
+data-cleaning one: it stops repeated refresh runs from re-appending
 notices already on disk. It stays in ingestion for that reason — see the
 project docs for more on this distinction. Dedup is scoped per country
 (each country has its own notices.jsonl), so it never needs cross-country
@@ -37,10 +37,11 @@ publication-number comparisons.
 
 Reads/writes go through common.storage (storage_mode="local" or "cloud",
 see common/storage.py). Unlike EEA measurements, this source has no
-content-hash change detection and no reporting-window refresh logic —
-TED notices are treated as immutable once published, and publication-
-number dedup already gives correct incremental behavior; there's no
-redownloadable "whole snapshot" file here to hash.
+content-hash change detection and no reporting-window mutable-years
+logic (see common/reporting_window.py) — TED notices are treated as
+immutable once published, and publication-number dedup already gives
+this mode ("refresh") correct behavior; there's no redownloadable
+"whole snapshot" file here to hash.
 
 Confirmed via a live test call (2026-08-19, 3-notice request, SORT BY +
 paginationMode=ITERATION):
@@ -54,10 +55,10 @@ paginationMode=ITERATION):
     paginate_iteration(), a True value there means TED's backend gave up
     before finishing the search, so that batch may be incomplete.
 
-Still unconfirmed — needs a real historical/incremental run to check,
+Still unconfirmed — needs a real historical/refresh run to check,
 since it depends on data volume, not response shape:
   - Whether publication-number is a safe, collision-free dedup key
-    (historical/incremental report duplicate counts so this is
+    (historical/refresh report duplicate counts so this is
     checkable; corrigenda/revisions might publish under a new number).
 
 Requires: pip install requests
@@ -169,7 +170,7 @@ def build_query(iso3: str, from_date: str = None, to_date: str = None,
     """
     Base filters (buyer-country / notice-type / environment CPV) are fixed
     and all evaluated server-side by TED. Only the date condition changes:
-      - since_date  -> incremental: publication-date>=<last run>
+      - since_date  -> refresh: publication-date>=<last run>
       - from/to     -> historical, bounded range
       - from only   -> historical, open-ended
       - none        -> full available history
@@ -378,7 +379,7 @@ def update_state_if_newer(state_path: str, new_date: str, storage_mode: str) -> 
     Set last_successful_run_date = new_date, unless state.json already has
     a date that's the same or later (never move the cursor backwards —
     e.g. a historical backfill for an old period shouldn't undo progress
-    already made by incremental runs). Returns True if state was updated.
+    already made by refresh runs). Returns True if state was updated.
     """
     state = load_state(state_path, storage_mode)
     current = state.get("last_successful_run_date")
@@ -504,9 +505,9 @@ def run_historical(countries: list[str], storage_mode: str, from_date: str = Non
             )
 
 
-def run_incremental(countries: list[str], storage_mode: str):
+def run_refresh(countries: list[str], storage_mode: str):
     """Loads notices since last successful run per country; updates each country's state.json only on success."""
-    logger.info("Starting TED ingestion | mode=incremental countries=%s storage_mode=%s", countries, storage_mode)
+    logger.info("Starting TED ingestion | mode=refresh countries=%s storage_mode=%s", countries, storage_mode)
 
     for country in countries:
         iso3 = iso2_to_iso3(country)
@@ -515,7 +516,7 @@ def run_incremental(countries: list[str], storage_mode: str):
         since_date = state.get("last_successful_run_date")
 
         if since_date:
-            logger.info("Starting incremental load | country=%s from=%s", country, since_date)
+            logger.info("Starting refresh load | country=%s from=%s", country, since_date)
         else:
             logger.warning(
                 "No prior state found | country=%s — this will fetch everything matching "
@@ -530,7 +531,7 @@ def run_incremental(countries: list[str], storage_mode: str):
 
         try:
             query = build_query(iso3, since_date=since_date, sort=True)
-            logger.debug("Incremental query | country=%s: %s", country, query)
+            logger.debug("Refresh query | country=%s: %s", country, query)
 
             seen = load_existing_publication_numbers(paths["dataset"], storage_mode)
             logger.info("Existing publication-numbers on disk | country=%s count=%s", country, len(seen))
@@ -546,14 +547,14 @@ def run_incremental(countries: list[str], storage_mode: str):
                     country, batch_count, new_count, dup_count,
                 )
         except Exception:
-            logger.exception("Incremental ingestion failed | country=%s — state.json will NOT be updated", country)
+            logger.exception("Refresh ingestion failed | country=%s — state.json will NOT be updated", country)
             raise  # do not update state on failure
 
         elapsed = time.monotonic() - start_time
 
-        logger.info("Incremental ingestion finished | country=%s", country)
+        logger.info("Refresh ingestion finished | country=%s", country)
         logger.info(
-            "Incremental ingestion summary | country=%s requests=%s received=%s "
+            "Refresh ingestion summary | country=%s requests=%s received=%s "
             "new_saved=%s duplicates=%s elapsed=%.1fs",
             country, batch_count, total_received, total_new, total_dup, elapsed,
         )
@@ -563,11 +564,11 @@ def run_incremental(countries: list[str], storage_mode: str):
         updated = update_state_if_newer(paths["state"], today, storage_mode)
         if updated:
             logger.info(
-                "Incremental load completed successfully. State updated | "
+                "Refresh load completed successfully. State updated | "
                 "country=%s last_successful_date=%s", country, today,
             )
         else:
-            logger.info("Incremental load completed successfully. State left unchanged | country=%s", country)
+            logger.info("Refresh load completed successfully. State left unchanged | country=%s", country)
 
 
 # --------------------------------------------------------------------------
@@ -589,17 +590,17 @@ def run(mode: str, storage_mode: str = "local", countries: list[str] | None = No
         run_test(countries, storage_mode)
     elif mode == "historical":
         run_historical(countries, storage_mode, from_date=from_date, to_date=to_date)
-    elif mode == "incremental":
-        run_incremental(countries, storage_mode)
+    elif mode == "refresh":
+        run_refresh(countries, storage_mode)
     else:
         raise ValueError(
-            f"Unknown mode {mode!r} — expected 'test', 'historical', or 'incremental'"
+            f"Unknown mode {mode!r} — expected 'test', 'historical', or 'refresh'"
         )
 
 
 if __name__ == "__main__":
     run(
-        mode="test",              # Run mode: test, historical, or incremental
+        mode="test",              # Run mode: test, historical, or refresh
         storage_mode="local",    # "local" for development/testing, "cloud" for S3 (PIPELINE_S3_BUCKET)
         countries=["DE"],        # e.g. ["DE", "PL"] — ISO2, one TED query per country
         from_date="2025-01-01",  # Start date for historical mode (YYYY-MM-DD)

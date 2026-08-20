@@ -55,8 +55,8 @@ logs a warning when this happens, since the batch may be incomplete.
 
 **Still open:** whether `publication-number` is a safe, collision-free
 dedup key — this depends on data volume (e.g. whether a corrigendum
-republishes under a new number), so it needs a real historical/incremental
-run to check, not just a small test call. `historical`/`incremental` log
+republishes under a new number), so it needs a real historical/refresh
+run to check, not just a small test call. `historical`/`refresh` log
 duplicate counts so this is checkable once run.
 
 ### Pagination — ITERATION mode
@@ -100,11 +100,11 @@ scoped per country:
 - **Publication-number dedup** — before appending, we check
   `publication-number` against everything already on disk for that
   country (`load_existing_publication_numbers`) so re-running
-  `incremental` or overlapping `historical` ranges doesn't duplicate raw
+  `refresh` or overlapping `historical` ranges doesn't duplicate raw
   storage. This is storage idempotency, not a data-quality dedup pass.
 - **`data/raw/ted/<country>/state.json`** —
   `{"last_successful_run_date": "..."}`, updated only after that
-  country's batch finishes successfully, so `incremental` knows where to
+  country's batch finishes successfully, so `refresh` knows where to
   resume per country, and a failed run never silently loses progress.
 
 Three modes, each looped over `countries`:
@@ -113,8 +113,13 @@ Three modes, each looped over `countries`:
   touch `state.json` or `notices.jsonl`.
 - **historical** — full `ITERATION` pagination over an explicit date
   range (or open-ended from a start date), per country.
-- **incremental** — same, but each country's date range comes from its
-  own `state.json["last_successful_run_date"]`.
+- **refresh** — same, but each country's date range comes from its
+  own `state.json["last_successful_run_date"]`. Named to match the
+  same mode on `ingestion.eea.measurements` — see
+  `docs/pipelines/countries.md` and `docs/storage_and_incremental.md`
+  for what "refresh" means for each source (TED has no reporting-window
+  mutable-years logic like EEA measurements does; here it's purely
+  "since the last successful run").
 
 ## Normalization — `normalization/ted/notices.py`
 

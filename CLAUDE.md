@@ -35,7 +35,7 @@ Preserve the existing ingestion modes where applicable:
 
 - `test`
 - `historical`
-- `incremental`
+- `refresh`
 
 Do not silently change the semantics of existing modes.
 
