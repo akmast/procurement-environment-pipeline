@@ -26,16 +26,25 @@ table. A measurement whose station can't be matched keeps its row (left
 join) with location/nuts1_code/nuts2_code/nuts3_code left empty, rather
 than being dropped or crashing the run.
 
-If `countries` isn't passed, every country already normalized is
-processed — read from the normalized layer's own directory structure.
+`countries` must be passed explicitly — run() never defaults to scanning
+and processing every country on disk. Pass discover_countries(storage_mode)
+yourself to process everything currently normalized — that way "process
+everything" is always a deliberate choice at the call site.
+
+Each entry can be a partition prefix at any granularity under
+data/normalized/eea/measurements/ ("DE", "DE/2025", "DE/2025/PM10") or
+an exact *.parquet file path (see common.storage.resolve_paths) — same
+convention as normalization.eea.measurements, so the exact set of files
+normalization just (re)wrote on a refresh run can be passed straight
+through to transformation without re-touching the rest of the country.
 
 Reads/writes go through common.storage, so storage_mode="local" (default)
 and storage_mode="cloud" (S3) run the same logic.
 
-    from transformation.eea.measurements import run
-    run()
+    from transformation.eea.measurements import run, discover_countries
     run(countries=["DE", "PL"])
-    run(storage_mode="cloud")
+    run(countries=discover_countries("local"))
+    run(countries=["DE"], storage_mode="cloud")
 """
 import logging
 import sys
@@ -48,7 +57,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from common.storage import exists, list_files, read_bytes, write_bytes
+from common.storage import exists, list_files, read_bytes, resolve_paths, write_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -155,21 +164,22 @@ def discover_countries(storage_mode: str) -> list[str]:
 def run(storage_mode: str = "local", countries: list[str] | None = None):
     """
     Transforms every normalized measurements Parquet file found under
-    data/normalized/eea/measurements/<country>/<year>/<pollutant>/ — one
-    output file per input file, same layout, under
-    data/transformed/eea/measurements/.
+    each of `countries` — one output file per input file, same layout,
+    under data/transformed/eea/measurements/. `countries` is required;
+    pass discover_countries(storage_mode) to process everything
+    currently normalized.
     """
-    countries = countries or discover_countries(storage_mode)
     if not countries:
-        logger.warning("No normalized measurements files found under %s", NORMALIZED_BASE_DIR)
-        return
+        raise ValueError(
+            "countries must be provided explicitly — e.g. countries=['DE'], or "
+            "countries=discover_countries(storage_mode) to process every country "
+            "already normalized. run() does not default to processing everything on disk."
+        )
 
     logger.info("Starting EEA measurements transformation | countries=%s storage_mode=%s",
                 countries, storage_mode)
 
-    normalized_files = []
-    for country in countries:
-        normalized_files.extend(list_files(f"{NORMALIZED_BASE_DIR}/{country}", storage_mode, suffix=".parquet"))
+    normalized_files = resolve_paths(countries, NORMALIZED_BASE_DIR, storage_mode, suffix=".parquet")
 
     if not normalized_files:
         logger.warning("No normalized measurements files found for countries=%s under %s",
@@ -189,5 +199,5 @@ def run(storage_mode: str = "local", countries: list[str] | None = None):
 if __name__ == "__main__":
     run(
         storage_mode="local",  # "local" for development/testing, "cloud" for S3 (PIPELINE_S3_BUCKET)
-        countries=["DE"],      # e.g. ["DE", "PL"] — omit/None to auto-discover from data/normalized/eea/measurements/
+        countries=["DE"],      # required — e.g. ["DE", "PL"], or discover_countries("local") for everything
     )

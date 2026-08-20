@@ -13,17 +13,20 @@ The raw ArcGIS attributes already include a per-row `CountryCode` field
 country column, carried through unchanged; no separate country_code is
 added on top of it.
 
-If `countries` isn't passed, every country already ingested (i.e. every
-subdirectory under data/raw/eea/stations/) is processed — read from the
-raw layer's own directory structure, not guessed from file content.
+`countries` must be passed explicitly — run() never defaults to scanning
+and processing every country on disk. To process everything currently
+ingested, pass discover_countries(storage_mode) yourself (it just lists
+the raw layer's own <country>/ subdirectories — nothing guessed from
+file content) — that way "process everything" is always a deliberate
+choice at the call site, not a hidden default.
 
 Reads/writes go through common.storage, so storage_mode="local" (default)
 and storage_mode="cloud" (S3) run the same logic.
 
-    from normalization.eea.stations import run
-    run()
+    from normalization.eea.stations import run, discover_countries
     run(countries=["DE", "PL"])
-    run(storage_mode="cloud")
+    run(countries=discover_countries("local"))
+    run(countries=["DE"], storage_mode="cloud")
 """
 import json
 import logging
@@ -82,10 +85,12 @@ def drop_popup_info(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def run(storage_mode: str = "local", countries: list[str] | None = None):
-    countries = countries or discover_countries(storage_mode)
     if not countries:
-        logger.warning("No raw station files found under %s", RAW_BASE_DIR)
-        return
+        raise ValueError(
+            "countries must be provided explicitly — e.g. countries=['DE'], or "
+            "countries=discover_countries(storage_mode) to process every country "
+            "already ingested. run() does not default to processing everything on disk."
+        )
 
     logger.info("Starting EEA station metadata normalization | countries=%s storage_mode=%s",
                 countries, storage_mode)
@@ -110,5 +115,5 @@ def run(storage_mode: str = "local", countries: list[str] | None = None):
 if __name__ == "__main__":
     run(
         storage_mode="local",  # "local" for development/testing, "cloud" for S3 (PIPELINE_S3_BUCKET)
-        countries=["DE"],      # e.g. ["DE", "PL"] — omit/None to auto-discover from data/raw/eea/stations/
+        countries=["DE"],      # required — e.g. ["DE", "PL"], or discover_countries("local") for everything
     )

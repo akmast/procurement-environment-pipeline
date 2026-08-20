@@ -146,10 +146,12 @@ def append_manifest_entry(entry: dict, country: str, storage_mode: str):
 
 
 def _download_and_save(url: str, dest_dir: str, i: int, total: int, country: str, year: int,
-                        pollutant: str, state: dict, storage_mode: str) -> tuple[int, bool]:
-    """Returns (bytes_downloaded, was_written) — was_written is False when
-    validation failed or the content hash matched what's already stored,
-    so nothing was (re)written to final storage."""
+                        pollutant: str, state: dict, storage_mode: str) -> tuple[int, bool, str | None]:
+    """Returns (bytes_downloaded, was_written, dest_path). was_written is
+    False when validation failed or the content hash matched what's
+    already stored, so nothing was (re)written to final storage — in
+    that case dest_path is None, since there's nothing new to hand to
+    normalization/transformation."""
     pct = int(i / total * 100)
     filename = Path(url).name or f"file_{i}.parquet"
     dest_path = f"{dest_dir}/{filename}"
@@ -162,7 +164,7 @@ def _download_and_save(url: str, dest_dir: str, i: int, total: int, country: str
 
     if not written:
         logger.info("Not written (unchanged or invalid) | %s", filename)
-        return len(content), False
+        return len(content), False, None
 
     append_manifest_entry({
         "url": url,
@@ -174,26 +176,31 @@ def _download_and_save(url: str, dest_dir: str, i: int, total: int, country: str
         "storage_path": dest_path,
     }, country, storage_mode)
     logger.info("Saved | %s (%.1f KB) -> %s", filename, len(content) / 1024, dest_path)
-    return len(content), True
+    return len(content), True, dest_path
 
 
 def download_pollutant_range(country: str, year: int, pollutant: str, from_date: str, to_date: str,
                               state: dict, storage_mode: str) -> dict:
     """Download every file for one country/pollutant within a date range,
-    skipping unchanged ones. Returns {"files": total, "written": changed_count}."""
+    skipping unchanged ones. Returns {"files": total, "written": changed_count,
+    "written_paths": [only the files actually (re)written this call]} —
+    written_paths is what a caller passes straight into
+    normalization/transformation to process only new data, instead of
+    rescanning the whole country (see common.storage.resolve_paths)."""
     pollutant_dir = f"{OUT_DIR}/{country}/{year}/{pollutant}"
 
     urls = get_file_urls(from_date, to_date, pollutant, country)
-    written = 0
+    written_paths = []
     for i, url in enumerate(urls, start=1):
-        _, was_written = _download_and_save(
+        _, was_written, dest_path = _download_and_save(
             url, pollutant_dir, i, len(urls), country, year, pollutant, state, storage_mode
         )
-        written += int(was_written)
+        if was_written:
+            written_paths.append(dest_path)
 
     logger.info("Pollutant finished | country=%s year=%s pollutant=%s files=%s written=%s",
-                country, year, pollutant, len(urls), written)
-    return {"files": len(urls), "written": written}
+                country, year, pollutant, len(urls), len(written_paths))
+    return {"files": len(urls), "written": len(written_paths), "written_paths": written_paths}
 
 
 def download_year(country: str, year: int, state: dict, storage_mode: str) -> dict:
@@ -202,9 +209,10 @@ def download_year(country: str, year: int, state: dict, storage_mode: str) -> di
         for pollutant in POLLUTANTS
     ]
     total_files = sum(r["files"] for r in results)
-    total_written = sum(r["written"] for r in results)
-    logger.info("Year finished | country=%s year=%s files=%s written=%s", country, year, total_files, total_written)
-    return {"year": year, "files": total_files, "written": total_written}
+    written_paths = [path for r in results for path in r["written_paths"]]
+    logger.info("Year finished | country=%s year=%s files=%s written=%s",
+                country, year, total_files, len(written_paths))
+    return {"year": year, "files": total_files, "written": len(written_paths), "written_paths": written_paths}
 
 
 # --------------------------------------------------------------------------
@@ -240,31 +248,45 @@ def run_test(countries: list[str], storage_mode: str):
             logger.info("Sample rows:\n%s", df.head(3).to_string())
 
 
-def run_historical(countries: list[str], from_year: int, to_year: int, storage_mode: str):
+def run_historical(countries: list[str], from_year: int, to_year: int, storage_mode: str) -> dict:
+    """Returns {country: {"files": ..., "written": ..., "written_paths": [...]}}
+    — written_paths is every file actually (re)written across all requested
+    years for that country, ready to hand to normalization/transformation
+    (see common.storage.resolve_paths) instead of reprocessing everything."""
     if from_year > to_year:
         raise ValueError(f"from_year ({from_year}) is after to_year ({to_year})")
 
     logger.info("Starting EEA measurements ingestion | mode=historical countries=%s years=%s-%s storage_mode=%s",
                 countries, from_year, to_year, storage_mode)
 
+    summary = {}
     for country in countries:
         state = load_state(country_state_path(country), storage_mode)
         results = [download_year(country, year, state, storage_mode) for year in range(from_year, to_year + 1)]
         save_state(country_state_path(country), state, storage_mode)
 
         total_files = sum(r["files"] for r in results)
-        total_written = sum(r["written"] for r in results)
+        written_paths = [path for r in results for path in r["written_paths"]]
         logger.info("Historical ingestion finished | country=%s years=%s-%s total_files=%s total_written=%s",
-                    country, from_year, to_year, total_files, total_written)
+                    country, from_year, to_year, total_files, len(written_paths))
+        summary[country] = {"files": total_files, "written": len(written_paths), "written_paths": written_paths}
+
+    return summary
 
 
-def run_refresh(countries: list[str], storage_mode: str):
+def run_refresh(countries: list[str], storage_mode: str) -> dict:
     """
     Re-checks every year in the current reporting-mutable window (see
     common.reporting_window.mutable_years) for each requested country —
     not a hardcoded year. Each file is re-requested and only rewritten if
     its content actually changed since the last run; unchanged files are
     left untouched.
+
+    Returns {country: {"files": ..., "written": ..., "written_paths": [...]}}
+    — written_paths is every file that actually changed this run, the
+    piece a refresh workflow needs to run normalization/transformation
+    on only the new data instead of the whole country (see
+    common.storage.resolve_paths).
     """
     years = mutable_years()
     logger.info("Starting EEA measurements ingestion | mode=refresh countries=%s years=%s storage_mode=%s",
@@ -273,6 +295,7 @@ def run_refresh(countries: list[str], storage_mode: str):
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     current_year = datetime.now(timezone.utc).year
 
+    summary = {}
     for country in countries:
         state = load_state(country_state_path(country), storage_mode)
 
@@ -284,30 +307,44 @@ def run_refresh(countries: list[str], storage_mode: str):
                 for pollutant in POLLUTANTS
             ]
             total_files = sum(r["files"] for r in year_results)
-            total_written = sum(r["written"] for r in year_results)
+            written_paths = [path for r in year_results for path in r["written_paths"]]
             logger.info("Year finished | country=%s year=%s files=%s written=%s",
-                        country, year, total_files, total_written)
-            results.append({"year": year, "files": total_files, "written": total_written})
+                        country, year, total_files, len(written_paths))
+            results.append({"year": year, "files": total_files, "written_paths": written_paths})
 
         save_state(country_state_path(country), state, storage_mode)
 
         total_files = sum(r["files"] for r in results)
-        total_written = sum(r["written"] for r in results)
+        written_paths = [path for r in results for path in r["written_paths"]]
         logger.info("Refresh finished | country=%s years=%s total_files=%s total_written=%s",
-                    country, years, total_files, total_written)
+                    country, years, total_files, len(written_paths))
+        summary[country] = {"files": total_files, "written": len(written_paths), "written_paths": written_paths}
+
+    return summary
 
 
 def run(mode: str, storage_mode: str = "local", countries: list[str] | None = None,
         from_year: int | None = None, to_year: int | None = None):
+    """
+    historical/refresh modes return {country: {"files", "written",
+    "written_paths"}} — pass written_paths straight into normalization/
+    transformation to process only the data that actually changed:
+
+        written = run(mode="refresh")
+        all_new_files = [p for country in written.values() for p in country["written_paths"]]
+        if all_new_files:
+            normalization.eea.measurements.run(countries=all_new_files)
+    """
     countries = countries or DEFAULT_COUNTRIES
     if mode == "test":
         run_test(countries, storage_mode)
+        return None
     elif mode == "historical":
         if from_year is None or to_year is None:
             raise ValueError("historical mode requires both from_year and to_year")
-        run_historical(countries, from_year, to_year, storage_mode)
+        return run_historical(countries, from_year, to_year, storage_mode)
     elif mode == "refresh":
-        run_refresh(countries, storage_mode)
+        return run_refresh(countries, storage_mode)
     else:
         raise ValueError(
             f"Unknown mode {mode!r} — expected 'test', 'historical', or 'refresh'"

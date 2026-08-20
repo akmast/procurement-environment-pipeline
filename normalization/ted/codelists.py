@@ -16,12 +16,21 @@ spa_label, ..., deu_label, eng_label, ...). Normalization doesn't pick a
 single label here — which one to prefer is an opinionated choice left to
 whatever joins against it (see transformation.ted.notices).
 
+`codelist_ids` must be passed explicitly — run() never defaults to
+scanning and processing every downloaded codelist. Pass
+discover_codelist_ids(storage_mode) yourself to process everything
+currently downloaded (it just lists the raw layer's own *.gc.xml
+filenames) — that way "process everything" is always a deliberate
+choice at the call site, same convention as every other
+normalization/transformation module in this project.
+
 Reads/writes go through common.storage, so storage_mode="local" (default)
 and storage_mode="cloud" (S3) run the same logic.
 
-    from normalization.ted.codelists import run
-    run()
-    run(storage_mode="cloud")
+    from normalization.ted.codelists import run, discover_codelist_ids
+    run(codelist_ids=["country", "currency"])
+    run(codelist_ids=discover_codelist_ids("local"))
+    run(codelist_ids=["cpv"], storage_mode="cloud")
 """
 import logging
 import sys
@@ -35,7 +44,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from common.storage import list_files, read_bytes, write_bytes
+from common.storage import exists, list_files, read_bytes, write_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -74,19 +83,30 @@ def parse_genericode(xml_bytes: bytes) -> list[dict]:
     return rows_out
 
 
-def run(storage_mode: str = "local"):
-    logger.info("Starting TED codelists normalization | storage_mode=%s", storage_mode)
-
+def discover_codelist_ids(storage_mode: str) -> list[str]:
+    """Codelist IDs come from the raw layer's own *.gc.xml filenames."""
     xml_files = list_files(RAW_DIR, storage_mode, suffix=".gc.xml")
-    if not xml_files:
-        raise FileNotFoundError(
-            f"No raw codelist files found under {RAW_DIR} — run ingestion.ted.codelists first."
+    return sorted(path.rsplit("/", 1)[-1].removesuffix(".gc.xml") for path in xml_files)
+
+
+def run(storage_mode: str = "local", codelist_ids: list[str] | None = None):
+    if not codelist_ids:
+        raise ValueError(
+            "codelist_ids must be provided explicitly — e.g. codelist_ids=['country'], or "
+            "codelist_ids=discover_codelist_ids(storage_mode) to process every codelist "
+            "already downloaded. run() does not default to processing everything on disk."
         )
 
+    logger.info("Starting TED codelists normalization | codelist_ids=%s storage_mode=%s",
+                codelist_ids, storage_mode)
+
     results = {}
-    for xml_path in xml_files:
-        filename = xml_path.rsplit("/", 1)[-1]
-        codelist_id = filename.removesuffix(".gc.xml")
+    for codelist_id in codelist_ids:
+        xml_path = f"{RAW_DIR}/{codelist_id}.gc.xml"
+        if not exists(xml_path, storage_mode):
+            logger.warning("Raw codelist not found, skipped | codelist=%s path=%s", codelist_id, xml_path)
+            continue
+
         rows = parse_genericode(read_bytes(xml_path, storage_mode))
         if not rows:
             logger.warning(
@@ -111,5 +131,6 @@ def run(storage_mode: str = "local"):
 
 if __name__ == "__main__":
     run(
-        storage_mode="local",  # "local" for development/testing, "cloud" for S3 (PIPELINE_S3_BUCKET)
+        storage_mode="local",       # "local" for development/testing, "cloud" for S3 (PIPELINE_S3_BUCKET)
+        codelist_ids=discover_codelist_ids("local"),  # required — or an explicit subset, e.g. ["country", "cpv"]
     )

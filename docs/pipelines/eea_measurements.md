@@ -125,6 +125,14 @@ Three modes, each looped over `countries`:
   year is hardcoded. Each file is only rewritten if its content actually
   changed.
 
+`historical` and `refresh` both return
+`{country: {"files", "written", "written_paths"}}` — `written_paths` is
+the exact list of files that changed this run, meant to be passed
+straight into `normalization.eea.measurements.run(countries=...)` and
+`transformation.eea.measurements.run(countries=...)` so a refresh only
+reprocesses the new data, not the whole country. See
+`docs/pipelines/countries.md` for the full pattern.
+
 ## Parquet schema (confirmed via a live file, 2026-08-19)
 
 ```

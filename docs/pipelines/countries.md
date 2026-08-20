@@ -6,17 +6,17 @@ for the details.
 
 ## The `countries` parameter
 
-Every `run(...)` across ingestion/normalization/transformation now takes
+Every `run(...)` across ingestion/normalization/transformation takes
 `countries: list[str] | None = None`, using ISO2 codes (`"DE"`, `"PL"`,
 ...) — the same code space as the storage directory names below.
 
 - **ingestion** — `countries` defaults to the pipeline's own
   `DEFAULT_COUNTRIES` (currently `["DE", "PL"]`) if not passed.
-- **normalization/transformation** — if `countries` isn't passed, every
-  country already present at the previous layer is auto-discovered by
-  listing that layer's own `<country>/` subdirectories (not guessed from
-  file content). Passing `countries` explicitly restricts a run to just
-  those.
+- **normalization/transformation** — `countries` is **required**; there
+  is no default. Passing nothing raises a `ValueError` rather than
+  silently scanning and processing every country on disk — see
+  "Explicit partitions only" below for why, and how to opt into
+  "everything" deliberately when that's actually what you want.
 
 ```python
 run(mode="stations", countries=["DE", "PL"])          # ingestion.eea.stations
@@ -26,6 +26,70 @@ run(mode="historical", countries=["DE", "PL"],         # ingestion.ted.notices
     from_date="2025-01-01", to_date="2025-01-31")
 run(countries=["DE", "PL"])                             # any normalization/transformation module
 ```
+
+## Explicit partitions only — no implicit whole-directory processing
+
+Normalization and transformation `run()` functions never default to
+"scan the base directory and process everything found there" — that
+used to be the behavior when `countries` was omitted (auto-discovery),
+but it meant every run reprocessed the entire dataset regardless of how
+much of it was actually new. `countries` (or `codelist_ids` for TED
+codelists, which has no country concept) is now **required**, and the
+caller decides its scope explicitly, two ways:
+
+- **A subset** — one or more country codes (`["DE"]`), or for EEA
+  measurements, a finer partition prefix at any granularity under its
+  `<country>/<year>/<pollutant>/` layout (`["DE/2025"]`,
+  `["DE/2025/PM10"]`), or an exact file path
+  (`["data/raw/eea/measurements/DE/2025/PM10/some_file.parquet"]`).
+  `common.storage.resolve_paths()` is what expands a mix of these into
+  the flat file list actually processed — a prefix is listed, an exact
+  path (one that already ends in the expected suffix) is used as-is.
+- **Everything currently on disk, deliberately** — each module still
+  exports its old auto-discovery logic as a plain function
+  (`discover_countries(storage_mode)`, or `discover_codelist_ids` for
+  codelists), so "process everything" is one explicit call away rather
+  than a hidden default:
+
+  ```python
+  from normalization.eea.stations import run, discover_countries
+  run(countries=discover_countries("local"))
+  ```
+
+### Refresh workflows: only the files that actually changed
+
+This matters most for EEA measurements, where ingestion already only
+(re)writes a file when its content-hash actually differs (see
+`docs/storage_and_incremental.md`) — reprocessing the whole country on
+every normalization/transformation run would throw that away and redo
+work on files nothing changed in. `ingestion.eea.measurements.run()` in
+`historical`/`refresh` mode returns exactly which files it wrote, so
+that list can be handed straight to normalization/transformation:
+
+```python
+from ingestion.eea.measurements import run as ingest
+from normalization.eea.measurements import run as normalize
+from transformation.eea.measurements import run as transform
+
+written = ingest(mode="refresh")
+# {"DE": {"files": 40, "written": 3, "written_paths": [...]}, "PL": {...}}
+
+new_files = [path for country in written.values() for path in country["written_paths"]]
+if new_files:
+    normalize(countries=new_files)
+    transform(countries=new_files)   # normalized paths mirror the raw layout, same relative paths work
+```
+
+`written_paths` is empty for a country/run where nothing actually
+changed — in that case there's nothing to normalize/transform, and the
+caller should skip the call rather than pass an empty list (which
+`run()` treats the same as "not provided" and rejects).
+
+EEA stations and TED notices don't need this: ingestion writes exactly
+one file per country each run (the whole station list, or the whole
+notices append), so `countries=["DE"]` already is "just the data for
+this country" — there's no finer-grained "only the new part" below the
+country level for those two sources.
 
 ## Server-side filtering, one request per country
 

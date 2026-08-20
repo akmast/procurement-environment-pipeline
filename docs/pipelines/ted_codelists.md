@@ -74,6 +74,12 @@ column, and one `<lang>_label` column per language (confirmed live:
 Normalization doesn't pick a single label — which one to prefer is an
 opinionated choice, left to whatever joins against it.
 
+`codelist_ids` must be passed explicitly (e.g. `["country", "cpv"]`) —
+`run()` never defaults to processing every downloaded codelist. Pass
+`discover_codelist_ids(storage_mode)` to process everything currently
+downloaded — same "explicit partitions only" convention as every other
+normalization/transformation module, see `docs/pipelines/countries.md`.
+
 ## Consumer — `transformation.ted.notices`
 
 Joins `code` against the coded columns in normalized TED notices

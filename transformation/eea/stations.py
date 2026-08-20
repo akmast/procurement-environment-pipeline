@@ -16,9 +16,11 @@ The NUTS3 boundaries themselves are EU-wide reference data, not scoped
 to any one country — they're loaded once per run and reused for every
 country's stations, not reloaded per country.
 
-If `countries` isn't passed, every country already normalized (i.e.
-every subdirectory under data/normalized/eea/stations/) is processed —
-read from the normalized layer's own directory structure, not guessed.
+`countries` must be passed explicitly — run() never defaults to scanning
+and processing every country on disk. To process everything currently
+normalized, pass discover_countries(storage_mode) yourself (it just
+lists the normalized layer's own <country>/ subdirectories) — that way
+"process everything" is always a deliberate choice at the call site.
 
 NUTS1/NUTS2 are not spatially matched separately: NUTS codes are
 hierarchical by construction (a NUTS3 code's first 3/4 characters *are*
@@ -34,10 +36,10 @@ nuts1_code/nuts2_code/nuts3_code = None rather than failing the run.
 Reads/writes go through common.storage, so storage_mode="local" (default)
 and storage_mode="cloud" (S3) run the same logic.
 
-    from transformation.eea.stations import run
-    run()
+    from transformation.eea.stations import run, discover_countries
     run(countries=["DE", "PL"])
-    run(storage_mode="cloud")
+    run(countries=discover_countries("local"))
+    run(countries=["DE"], storage_mode="cloud")
 
 Requires: pip install shapely
 """
@@ -171,10 +173,12 @@ def discover_countries(storage_mode: str) -> list[str]:
 
 
 def run(storage_mode: str = "local", countries: list[str] | None = None):
-    countries = countries or discover_countries(storage_mode)
     if not countries:
-        logger.warning("No normalized station files found under %s", NORMALIZED_BASE_DIR)
-        return
+        raise ValueError(
+            "countries must be provided explicitly — e.g. countries=['DE'], or "
+            "countries=discover_countries(storage_mode) to process every country "
+            "already normalized. run() does not default to processing everything on disk."
+        )
 
     logger.info("Starting EEA station metadata transformation | countries=%s storage_mode=%s",
                 countries, storage_mode)
@@ -207,5 +211,5 @@ def run(storage_mode: str = "local", countries: list[str] | None = None):
 if __name__ == "__main__":
     run(
         storage_mode="local",  # "local" for development/testing, "cloud" for S3 (PIPELINE_S3_BUCKET)
-        countries=["DE"],      # e.g. ["DE", "PL"] — omit/None to auto-discover from data/normalized/eea/stations/
+        countries=["DE"],      # required — e.g. ["DE", "PL"], or discover_countries("local") for everything
     )

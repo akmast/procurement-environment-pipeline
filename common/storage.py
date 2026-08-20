@@ -131,6 +131,34 @@ def list_files(relative_prefix: str, storage_mode: str, suffix: str = "") -> lis
     return sorted(keys)
 
 
+def resolve_paths(entries: list[str], base_dir: str, storage_mode: str, suffix: str) -> list[str]:
+    """
+    Expands a mix of partition prefixes and exact file paths into a flat
+    list of file paths to process. Each entry is either:
+      - an exact file path (ends with `suffix`) — used as-is (prefixed
+        with base_dir if not already a full path), so a caller that
+        already knows exactly which files are new (e.g. the paths a
+        refresh run just wrote) can target only those, without
+        rescanning the rest of base_dir;
+      - a directory/partition prefix (e.g. a country code, or a finer
+        "country/year/pollutant" path) — expanded via list_files()
+        under base_dir/entry, picking up every matching file currently
+        there.
+
+    Used by normalization/transformation run() functions that accept a
+    `countries`-style argument, so "only the files that changed" and
+    "everything under this country" are both expressible with the same
+    parameter.
+    """
+    files = []
+    for entry in entries:
+        if entry.endswith(suffix):
+            files.append(entry if entry.startswith(f"{base_dir}/") else f"{base_dir}/{entry}")
+        else:
+            files.extend(list_files(f"{base_dir}/{entry}", storage_mode, suffix=suffix))
+    return files
+
+
 def head_metadata(relative_path: str, storage_mode: str) -> dict | None:
     """
     {"size": int, "last_modified": datetime} for the current object, or

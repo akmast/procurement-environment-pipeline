@@ -46,16 +46,19 @@ Key real-data findings that shaped this:
 directory) — a different code space from `buyer_country` (TED's own
 ISO3 field, kept as returned).
 
-If `countries` isn't passed, every country already ingested is
-processed — read from the raw layer's own directory structure.
+`countries` must be passed explicitly — run() never defaults to scanning
+and processing every country on disk. Pass discover_countries(storage_mode)
+yourself to process everything currently ingested (it just lists the raw
+layer's own <country>/ subdirectories) — that way "process everything"
+is always a deliberate choice at the call site.
 
 Reads/writes go through common.storage, so storage_mode="local"
 (default) and storage_mode="cloud" (S3) run the same logic.
 
-    from normalization.ted.notices import run
-    run()
+    from normalization.ted.notices import run, discover_countries
     run(countries=["DE", "PL"])
-    run(storage_mode="cloud")
+    run(countries=discover_countries("local"))
+    run(countries=["DE"], storage_mode="cloud")
 """
 import json
 import logging
@@ -268,10 +271,12 @@ def flatten_notice(notice: dict, country: str) -> dict:
 
 
 def run(storage_mode: str = "local", countries: list[str] | None = None):
-    countries = countries or discover_countries(storage_mode)
     if not countries:
-        logger.warning("No raw notices files found under %s", RAW_BASE_DIR)
-        return
+        raise ValueError(
+            "countries must be provided explicitly — e.g. countries=['DE'], or "
+            "countries=discover_countries(storage_mode) to process every country "
+            "already ingested. run() does not default to processing everything on disk."
+        )
 
     logger.info("Starting TED notices normalization | countries=%s storage_mode=%s", countries, storage_mode)
 
@@ -307,5 +312,5 @@ def run(storage_mode: str = "local", countries: list[str] | None = None):
 if __name__ == "__main__":
     run(
         storage_mode="local",  # "local" for development/testing, "cloud" for S3 (PIPELINE_S3_BUCKET)
-        countries=["DE"],      # e.g. ["DE", "PL"] — omit/None to auto-discover from data/raw/ted/
+        countries=["DE"],      # required — e.g. ["DE", "PL"], or discover_countries("local") for everything
     )

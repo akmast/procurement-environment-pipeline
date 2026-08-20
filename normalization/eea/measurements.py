@@ -17,16 +17,29 @@ same way: the raw Parquet schema has no country field at all, so it's
 read from the file's own folder path — which ingestion already laid out
 per country — rather than guessed from any in-file content.
 
-If `countries` isn't passed, every country already ingested (i.e. every
-top-level subdirectory under data/raw/eea/measurements/) is processed.
+`countries` must be passed explicitly — run() never defaults to scanning
+and processing every country on disk. Pass discover_countries(storage_mode)
+yourself to process everything currently ingested (it just lists the raw
+layer's own top-level <country>/ subdirectories) — that way "process
+everything" is always a deliberate choice at the call site.
+
+Each entry can be a partition prefix at any granularity under
+data/raw/eea/measurements/ — "DE" (a whole country), "DE/2025" (one
+year), "DE/2025/PM10" (one country/year/pollutant) — or an exact
+*.parquet file path (see common.storage.resolve_paths). The exact-path
+form is what makes "only the files a refresh run just wrote" possible:
+pass ingestion.eea.measurements' own returned written_paths straight
+into normalization/transformation instead of re-scanning (and
+re-normalizing) the whole country.
 
 Reads/writes go through common.storage, so storage_mode="local" (default)
 and storage_mode="cloud" (S3) run the same logic.
 
-    from normalization.eea.measurements import run
-    run()
+    from normalization.eea.measurements import run, discover_countries
     run(countries=["DE", "PL"])
-    run(storage_mode="cloud")
+    run(countries=["DE/2025/PM10"])
+    run(countries=discover_countries("local"))
+    run(countries=["DE"], storage_mode="cloud")
 """
 import logging
 import re
@@ -40,7 +53,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from common.storage import list_files, read_bytes, write_bytes
+from common.storage import list_files, read_bytes, resolve_paths, write_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -162,20 +175,21 @@ def discover_countries(storage_mode: str) -> list[str]:
 
 def run(storage_mode: str = "local", countries: list[str] | None = None):
     """
-    Normalizes every raw measurements Parquet file found under
-    data/raw/eea/measurements/<country>/<year>/<pollutant>/ — one output
-    file per input file, same country/year/pollutant layout, under
-    data/normalized/eea/measurements/. If `countries` isn't passed, every
-    country already ingested is processed.
+    Normalizes every raw measurements Parquet file found under each of
+    `countries` (relative paths under data/raw/eea/measurements/, e.g.
+    "DE" or "DE/2025/PM10") — one output file per input file, same
+    layout, under data/normalized/eea/measurements/. `countries` is
+    required; pass discover_countries(storage_mode) to process
+    everything currently ingested.
     """
-    countries = countries or discover_countries(storage_mode)
     if not countries:
-        logger.warning("No raw measurements files found under %s", RAW_BASE_DIR)
-        return
+        raise ValueError(
+            "countries must be provided explicitly — e.g. countries=['DE'], or "
+            "countries=discover_countries(storage_mode) to process every country "
+            "already ingested. run() does not default to processing everything on disk."
+        )
 
-    raw_files = []
-    for country in countries:
-        raw_files.extend(list_files(f"{RAW_BASE_DIR}/{country}", storage_mode, suffix=".parquet"))
+    raw_files = resolve_paths(countries, RAW_BASE_DIR, storage_mode, suffix=".parquet")
 
     if not raw_files:
         logger.warning("No raw measurements files found for countries=%s under %s", countries, RAW_BASE_DIR)
@@ -191,5 +205,5 @@ def run(storage_mode: str = "local", countries: list[str] | None = None):
 if __name__ == "__main__":
     run(
         storage_mode="local",  # "local" for development/testing, "cloud" for S3 (PIPELINE_S3_BUCKET)
-        countries=["DE"],      # e.g. ["DE", "PL"] — omit/None to auto-discover from data/raw/eea/measurements/
+        countries=["DE"],      # required — e.g. ["DE", "PL"], or discover_countries("local") for everything
     )

@@ -28,16 +28,18 @@ if no label column is usable. A code with no match in its codelist (or
 a codelist that failed to load) gets a null label rather than failing
 the run — labeling is an enrichment, not a required field.
 
-If `countries` isn't passed, every country already normalized is
-processed — read from the normalized layer's own directory structure.
+`countries` must be passed explicitly — run() never defaults to scanning
+and processing every country on disk. Pass discover_countries(storage_mode)
+yourself to process everything currently normalized — that way "process
+everything" is always a deliberate choice at the call site.
 
 Reads/writes go through common.storage, so storage_mode="local"
 (default) and storage_mode="cloud" (S3) run the same logic.
 
-    from transformation.ted.notices import run
-    run()
+    from transformation.ted.notices import run, discover_countries
     run(countries=["DE", "PL"])
-    run(storage_mode="cloud")
+    run(countries=discover_countries("local"))
+    run(countries=["DE"], storage_mode="cloud")
 """
 import logging
 import sys
@@ -152,10 +154,12 @@ def add_codelist_labels(df: pd.DataFrame, lookups: dict[str, dict]) -> pd.DataFr
 
 
 def run(storage_mode: str = "local", countries: list[str] | None = None):
-    countries = countries or discover_countries(storage_mode)
     if not countries:
-        logger.warning("No normalized notices files found under %s", NORMALIZED_BASE_DIR)
-        return
+        raise ValueError(
+            "countries must be provided explicitly — e.g. countries=['DE'], or "
+            "countries=discover_countries(storage_mode) to process every country "
+            "already normalized. run() does not default to processing everything on disk."
+        )
 
     logger.info("Starting TED notices transformation | countries=%s storage_mode=%s", countries, storage_mode)
 
@@ -187,5 +191,5 @@ def run(storage_mode: str = "local", countries: list[str] | None = None):
 if __name__ == "__main__":
     run(
         storage_mode="local",  # "local" for development/testing, "cloud" for S3 (PIPELINE_S3_BUCKET)
-        countries=["DE"],      # e.g. ["DE", "PL"] — omit/None to auto-discover from data/normalized/ted/
+        countries=["DE"],      # required — e.g. ["DE", "PL"], or discover_countries("local") for everything
     )
