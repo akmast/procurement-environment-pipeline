@@ -10,13 +10,21 @@ Not a standalone entry point — called from root main.py:
     run_ted_ingestion(mode="refresh", countries=["DE", "PL"])
     run_ted_ingestion(mode="refresh", storage_mode="cloud")
 
-Saves notices exactly as TED returns them for the requested FIELDS — no
-field stripping, no language trimming, no added columns. That JSON
-reshaping (including stamping an explicit country_code) happens in
-normalization.ted.notices. Country scope (buyer-country) is applied
-server-side, inside the TED query string itself — TED's expert query
-language processes it before any notices are returned, so this is not a
-post-fetch filter.
+Saves notices as TED returns them for the requested FIELDS, with one
+deliberate exception (see trim_heavy_fields() below): "links" (PDF/XML/
+HTML URLs in all 24 EU languages — always present in the response
+regardless of FIELDS, TED doesn't let this one be filtered server-side)
+is dropped, and "notice-title" (also translated into all 24 languages)
+is trimmed down to English plus the buyer country's own official
+language(s). Both are large, genuinely unused by normalization/
+transformation, and were bloating raw storage for no benefit — this is
+the one place this project trims response content at ingestion time
+rather than keeping it byte-for-byte, and it's confined to exactly
+these two fields. Everything else is untouched, no added columns — that
+reshaping happens in normalization.ted.notices. Country scope
+(buyer-country) is applied server-side, inside the TED query string
+itself — TED's expert query language processes it before any notices
+are returned, so this is not a post-fetch filter.
 
 Multiple countries: one TED query per country (mirrors the same
 one-request-per-scope pattern used by the EEA pipelines), each with its
@@ -113,6 +121,58 @@ FIELDS = [
     "winner-name", "winner-selection-status", "contract-conclusion-date",
     "non-award-justification", "green-procurement-criteria-lot",
 ]
+
+# Fields trimmed at ingestion time — see trim_heavy_fields() and the
+# module docstring for why this is an intentional exception to "save
+# raw content untouched". LINKS_FIELD is dropped outright: it's a block
+# of PDF/XML/HTML URLs repeated in all 24 EU languages, confirmed to be
+# present in every response regardless of FIELDS above (TED doesn't
+# support filtering it out server-side), and normalization/
+# transformation never read it.
+LINKS_FIELD = "links"
+TITLE_FIELD = "notice-title"
+
+# notice-title is professionally translated by TED into all 24 official
+# EU languages; every other multilingual field this project requests
+# (buyer-name, winner-name, buyer-city) is only ever populated in the
+# notice's own origin language, so there's nothing to trim there.
+# Mapped by ISO2 buyer-country (this project's own country scope, see
+# EU_ISO2_TO_ISO3 above) to the TED/eForms 3-letter language code(s)
+# used as notice-title's dict keys — "eng" is always kept regardless of
+# country, so it isn't repeated in every entry below. Countries with
+# more than one official EU-recognized language (Belgium) keep more
+# than one rather than guessing a single "correct" one; Ireland/Malta
+# map to their non-English official language since English is already
+# always kept anyway.
+TED_LANGUAGE_BY_COUNTRY = {
+    "AT": ["deu"], "BE": ["nld", "fra"], "BG": ["bul"], "HR": ["hrv"],
+    "CY": ["ell"], "CZ": ["ces"], "DK": ["dan"], "EE": ["est"],
+    "FI": ["fin"], "FR": ["fra"], "DE": ["deu"], "GR": ["ell"],
+    "HU": ["hun"], "IE": ["gle"], "IT": ["ita"], "LV": ["lav"],
+    "LT": ["lit"], "LU": ["fra"], "MT": ["mlt"], "NL": ["nld"],
+    "PL": ["pol"], "PT": ["por"], "RO": ["ron"], "SK": ["slk"],
+    "SI": ["slv"], "ES": ["spa"], "SE": ["swe"],
+}
+
+
+def trim_heavy_fields(notice: dict, country: str) -> dict:
+    """
+    Mutates and returns `notice` in place: drops "links" entirely, and
+    trims "notice-title" down to English plus `country`'s own official
+    language(s) (falls back to whatever's already there if `country`
+    isn't in TED_LANGUAGE_BY_COUNTRY, rather than raising — this is a
+    storage-size optimization, not something that should ever fail a
+    run). See the module docstring for why this specific exception to
+    "raw = untouched" exists.
+    """
+    notice.pop(LINKS_FIELD, None)
+
+    title = notice.get(TITLE_FIELD)
+    if isinstance(title, dict):
+        keep_languages = {"eng", *TED_LANGUAGE_BY_COUNTRY.get(country, [])}
+        notice[TITLE_FIELD] = {lang: value for lang, value in title.items() if lang in keep_languages}
+
+    return notice
 
 # Environment-related CPV codes (division-level)
 ENV_CPV_CODES = [
@@ -347,8 +407,10 @@ def load_existing_publication_numbers(path: str, storage_mode: str) -> set:
     return seen
 
 
-def append_batch_jsonl(path: str, batch: list, seen: set, storage_mode: str) -> tuple:
-    """Append new notices to JSONL, skipping existing publication-numbers."""
+def append_batch_jsonl(path: str, batch: list, seen: set, storage_mode: str, country: str) -> tuple:
+    """Append new notices to JSONL, skipping existing publication-numbers.
+    Each notice is passed through trim_heavy_fields() first — see the
+    module docstring for why."""
     new_count = 0
     dup_count = 0
     lines = []
@@ -357,6 +419,7 @@ def append_batch_jsonl(path: str, batch: list, seen: set, storage_mode: str) -> 
         if pub_num in seen:
             dup_count += 1
             continue
+        notice = trim_heavy_fields(notice, country)
         lines.append(json.dumps(notice, ensure_ascii=False))
         seen.add(pub_num)
         new_count += 1
@@ -428,6 +491,7 @@ def run_test(countries: list[str], storage_mode: str) -> StageResult:
 
             logger.info("Notices received | country=%s count=%s", country, len(notices))
 
+            notices = [trim_heavy_fields(notice, country) for notice in notices]
             write_text(paths["test"], json.dumps(notices, ensure_ascii=False, indent=2), storage_mode)
             result.record_written(paths["test"])
             logger.info("Test ingestion saved | country=%s path=%s", country, paths["test"])
@@ -477,7 +541,7 @@ def run_historical(countries: list[str], storage_mode: str, from_date: str = Non
             for batch in paginate_iteration(query):
                 batch_count += 1
                 total_received += len(batch)
-                new_count, dup_count = append_batch_jsonl(paths["dataset"], batch, seen, storage_mode)
+                new_count, dup_count = append_batch_jsonl(paths["dataset"], batch, seen, storage_mode, country)
                 total_new += new_count
                 total_dup += dup_count
                 logger.info(
@@ -566,7 +630,7 @@ def run_refresh(countries: list[str], storage_mode: str) -> StageResult:
             for batch in paginate_iteration(query):
                 batch_count += 1
                 total_received += len(batch)
-                new_count, dup_count = append_batch_jsonl(paths["dataset"], batch, seen, storage_mode)
+                new_count, dup_count = append_batch_jsonl(paths["dataset"], batch, seen, storage_mode, country)
                 total_new += new_count
                 total_dup += dup_count
                 logger.info(

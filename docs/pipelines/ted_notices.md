@@ -88,10 +88,21 @@ code TED's query language expects (`buyer-country=DEU` — see
 other sources don't), fetches notices in batches via
 `paginate_iteration()`, and appends each batch to
 `data/raw/ted/<country>/notices.jsonl`, one JSON object per line,
-**exactly as TED returns it** for the fields we asked for — all ~23
-language variants of `buyer-name`/`notice-title`, the `links` block,
-everything. No field stripping, no language trimming, no added columns —
-that happens in normalization.
+**exactly as TED returns it** for the fields we asked for, with one
+deliberate exception applied by `trim_heavy_fields()` before each
+notice is written: the `links` block (PDF/XML/HTML URLs in all 24 EU
+languages — always present in the response regardless of `FIELDS`,
+TED doesn't support filtering it out server-side) is dropped, and
+`notice-title` (also translated by TED into all 24 languages) is
+trimmed to English plus the buyer country's own official language(s)
+(`TED_LANGUAGE_BY_COUNTRY`). Both were large, never read by
+normalization/transformation, and were bloating raw storage for no
+benefit — this is the only place this project trims API response
+content before it's even written to raw storage; every other field,
+and every other language variant of `buyer-name`/`winner-name`/
+`buyer-city` (which TED only ever populates in one language to begin
+with), is kept as-is. No added columns — reshaping happens in
+normalization.
 
 Two mechanisms live in ingestion, not normalization, because they're
 about *how raw data gets persisted*, not about *cleaning it* — both
@@ -175,8 +186,10 @@ several regions doesn't lose that information. `country_code` is this
 project's own ISO2 code (from the file's own directory) — a different
 code space from `buyer_country` (TED's own ISO3 field, kept untouched).
 
-Entirely dropped: `links` (all `pdf`/`html`/`htmlDirect`/`xml` blocks —
-technical URLs, not analytical data).
+`links` (all `pdf`/`html`/`htmlDirect`/`xml` blocks — technical URLs,
+not analytical data) and most of `notice-title`'s language variants
+never even reach this stage — both are already trimmed at ingestion
+time (`ingestion.ted.notices.trim_heavy_fields()`), not here.
 
 Three fields needed a real populated sample to pin down (confirmed
 2026-08-20):
@@ -250,13 +263,16 @@ POST /notices/search (buyer-country=<ISO3> AND notice-type=... AND CPV AND date 
 JSON batch of up to 250 notices (full TED shape) + iterationNextToken
         │
         ▼
+trim_heavy_fields(): drop links, trim notice-title to eng + local language
+        │
+        ▼
 append new (by publication-number) to data/raw/ted/<country>/notices.jsonl
         │
         ▼
 normalization.ted.notices.run()
         │  unwrap list-wrapped scalars, resolve multilingual fields,
         │  split place-of-performance into NUTS + country, dedupe CPV,
-        │  parse dates, drop links, stamp country_code
+        │  parse dates, stamp country_code
         ▼
 data/normalized/ted/<country>/notices.parquet
         │
