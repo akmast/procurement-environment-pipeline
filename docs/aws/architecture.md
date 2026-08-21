@@ -18,6 +18,7 @@ normalization, transformation) — this layer only decides *when* and
 | Amazon EventBridge Scheduler | Fires the monthly update | Purpose-built recurring trigger, decoupled from GitHub |
 | Amazon S3 | Data storage (raw/normalized/transformed) + run manifests + bootstrap marker | Already the pipeline's storage abstraction (`common/storage.py`) — cloud mode is additive, not new |
 | CloudWatch Logs | Container + Step Functions execution logs | Centralized, queryable observability |
+| AWS Budgets | Monthly cost tracking + email alerts | Notification-only cost visibility, scoped to this project's `Project` tag — never disables resources (see `budget.tf`, `docs/aws/operations.md`) |
 
 **No Lambda in the execution path.** pandas/PyArrow/Shapely workloads
 never run in Lambda (memory/time/package-size limits, and it would

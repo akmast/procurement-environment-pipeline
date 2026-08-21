@@ -112,6 +112,44 @@ Fargate task-hours per month, small S3 volumes):
 **No NAT Gateway cost** (see `architecture.md` for the trade-off this
 accepts). No idle compute — nothing runs between invocations.
 
+## Cost budget and notifications
+
+`budget.tf` creates a monthly AWS Budgets **COST** budget
+(`procurement-environment-pipeline-monthly-budget`, `budget_limit_amount`
+= 20 by default, `budget_currency` = EUR by default) scoped to this
+project's resources via the `Project` cost allocation tag, with email
+notifications at 80% and 100% of the limit. **It is notification-only —
+it never stops, disables, or deletes anything**, by design (see
+`budget.tf`'s own comment for why a hard spend cap isn't implemented).
+
+Two things must be true for the numbers it reports to actually reflect
+this project's spend:
+
+1. **The `Project` tag must be activated as a cost allocation tag** —
+   a one-time, manual, non-destructive step (not something Terraform
+   does automatically — see `budget.tf`'s comment for why):
+   ```
+   aws ce update-cost-allocation-tags-status \
+     --cost-allocation-tags-status TagKey=Project,Status=Active
+   ```
+   Do this only after the project's resources have existed for a
+   while — a brand-new tag can take up to 24 hours to appear as
+   activatable in Cost Explorer/Billing. Check current status with:
+   ```
+   aws ce list-cost-allocation-tags --status Active --query "CostAllocationTags[?TagKey=='Project']"
+   ```
+2. **Fargate tasks must carry the tag on the running task, not just
+   the task definition** — every `ecs:RunTask` call in the Step
+   Functions templates already sets `PropagateTags: TASK_DEFINITION`
+   and `EnableECSManagedTags: true`, so this happens automatically;
+   nothing to do here, just know why compute costs show up under the
+   tag.
+
+Even once both are true, the reported number is an **approximation**,
+not a mirror of your invoice — see `deployment.md`'s note on
+`budget_currency` for why (AWS tracks the underlying cost data in USD
+internally and converts to EUR using its own exchange rate).
+
 ## Safe infrastructure teardown
 
 1. **Disable the schedule first** (see above) so nothing fires mid-teardown.

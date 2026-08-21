@@ -111,3 +111,21 @@ variable "update_schedule_enabled" {
   type        = bool
   default     = false
 }
+
+variable "budget_limit_amount" {
+  description = "Monthly AWS Budgets cost limit for this project's tagged resources (see budget.tf). Notification-only — never triggers any automatic resource shutdown or restriction."
+  type        = number
+  default     = 20
+}
+
+variable "budget_currency" {
+  description = "ISO 4217 currency code for the monthly budget limit, e.g. \"EUR\" or \"USD\". AWS Budgets/Cost Explorer track underlying cost data in USD internally and convert to a non-USD budget currency using AWS's own periodically-updated exchange rate, not necessarily the rate/timing your actual invoice uses — a non-USD budget is a close approximation, not an exact mirror of your bill. Verify your account's real billing currency in Billing Console → Payment preferences before relying on this figure precisely (see docs/aws/operations.md)."
+  type        = string
+  default     = "EUR"
+}
+
+variable "budget_notification_email" {
+  description = "Email address that receives budget threshold notifications (see budget.tf's 80%/100% notification blocks). Required, no default — never hardcode an email in Terraform source. Supplied via TF_VAR_budget_notification_email in deploy.yml, sourced from the BUDGET_NOTIFICATION_EMAIL GitHub repo variable; for a local/manual apply, export TF_VAR_budget_notification_email or pass -var."
+  type        = string
+  sensitive   = true
+}

@@ -67,3 +67,8 @@ output "pipeline_task_security_group_id" {
   description = "Security group ID (outbound only) attached to every Fargate task."
   value       = aws_security_group.pipeline_task.id
 }
+
+output "budget_name" {
+  description = "AWS Budgets cost budget name — notification-only, never auto-disables resources."
+  value       = aws_budgets_budget.project_monthly_cost.name
+}

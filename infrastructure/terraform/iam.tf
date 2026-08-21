@@ -118,6 +118,13 @@ resource "aws_iam_role_policy" "step_functions" {
           "ecs:RunTask",
           "ecs:StopTask",
           "ecs:DescribeTasks",
+          # Required because every RunTask call sets PropagateTags=TASK_DEFINITION
+          # (see step_functions.tf's templates) so each running task — and
+          # therefore its Fargate compute cost — carries the task
+          # definition's "Project" tag; that's what budget.tf's cost
+          # budget filters on. Without this permission, tag propagation
+          # on RunTask fails.
+          "ecs:TagResource",
         ]
         Resource = [
           aws_ecs_task_definition.pipeline.arn,

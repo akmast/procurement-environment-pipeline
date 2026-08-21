@@ -34,6 +34,8 @@
                 "LaunchType": "FARGATE",
                 "Cluster": "${ecs_cluster_arn}",
                 "TaskDefinition": "${ecs_task_definition_arn}",
+                "PropagateTags": "TASK_DEFINITION",
+                "EnableECSManagedTags": true,
                 "NetworkConfiguration": {
                   "AwsvpcConfiguration": {
                     "Subnets": ${subnet_ids_json},
@@ -73,6 +75,8 @@
                 "LaunchType": "FARGATE",
                 "Cluster": "${ecs_cluster_arn}",
                 "TaskDefinition": "${ecs_task_definition_arn}",
+                "PropagateTags": "TASK_DEFINITION",
+                "EnableECSManagedTags": true,
                 "NetworkConfiguration": {
                   "AwsvpcConfiguration": {
                     "Subnets": ${subnet_ids_json},
@@ -105,6 +109,8 @@
                 "LaunchType": "FARGATE",
                 "Cluster": "${ecs_cluster_arn}",
                 "TaskDefinition": "${ecs_task_definition_arn}",
+                "PropagateTags": "TASK_DEFINITION",
+                "EnableECSManagedTags": true,
                 "NetworkConfiguration": {
                   "AwsvpcConfiguration": {
                     "Subnets": ${subnet_ids_json},
@@ -144,6 +150,8 @@
                 "LaunchType": "FARGATE",
                 "Cluster": "${ecs_cluster_arn}",
                 "TaskDefinition": "${ecs_task_definition_arn}",
+                "PropagateTags": "TASK_DEFINITION",
+                "EnableECSManagedTags": true,
                 "NetworkConfiguration": {
                   "AwsvpcConfiguration": {
                     "Subnets": ${subnet_ids_json},
@@ -176,6 +184,8 @@
                 "LaunchType": "FARGATE",
                 "Cluster": "${ecs_cluster_arn}",
                 "TaskDefinition": "${ecs_task_definition_arn}",
+                "PropagateTags": "TASK_DEFINITION",
+                "EnableECSManagedTags": true,
                 "NetworkConfiguration": {
                   "AwsvpcConfiguration": {
                     "Subnets": ${subnet_ids_json},
@@ -208,6 +218,8 @@
                 "LaunchType": "FARGATE",
                 "Cluster": "${ecs_cluster_arn}",
                 "TaskDefinition": "${ecs_task_definition_arn}",
+                "PropagateTags": "TASK_DEFINITION",
+                "EnableECSManagedTags": true,
                 "NetworkConfiguration": {
                   "AwsvpcConfiguration": {
                     "Subnets": ${subnet_ids_json},
@@ -247,6 +259,8 @@
         "LaunchType": "FARGATE",
         "Cluster": "${ecs_cluster_arn}",
         "TaskDefinition": "${ecs_task_definition_arn}",
+        "PropagateTags": "TASK_DEFINITION",
+        "EnableECSManagedTags": true,
         "NetworkConfiguration": {
           "AwsvpcConfiguration": {
             "Subnets": ${subnet_ids_json},

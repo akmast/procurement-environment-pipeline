@@ -18,6 +18,15 @@ env:
   AWS_REGION: ${{ vars.AWS_REGION }}
   TF_DIR: infrastructure/terraform
   ECR_REPOSITORY: procurement-environment-pipeline
+  # Required Terraform variable with no default (see variables.tf) — read
+  # from a GitHub Actions Secret, not a Variable: an email address isn't
+  # a system credential, but it's still personal data that shouldn't be
+  # plainly readable by anyone with repo settings access or accidentally
+  # unmasked in a log line the way a Variable would be. Terraform picks
+  # up any TF_VAR_<name> env var automatically. Set this under Settings →
+  # Secrets and variables → Actions → Secrets (not Variables) →
+  # BUDGET_NOTIFICATION_EMAIL before the first deploy — see docs/aws/deployment.md.
+  TF_VAR_budget_notification_email: ${{ secrets.BUDGET_NOTIFICATION_EMAIL }}
 
 jobs:
   deploy:

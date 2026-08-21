@@ -10,6 +10,17 @@
   does not create the role or touch its trust policy.
 - GitHub repository variables: `AWS_REGION=eu-central-1`,
   `AWS_ROLE_ARN=arn:aws:iam::137307166874:role/GitHubDeployRole`.
+- GitHub repository **Secret** (not Variable) `BUDGET_NOTIFICATION_EMAIL`
+  — the address that receives budget threshold notifications (see
+  `budget.tf` and `operations.md`'s "Cost budget and notifications").
+  Not a system credential the way `AWS_ROLE_ARN` is, but it's personal
+  data, not something to keep as plainly-readable as `AWS_REGION`/
+  `AWS_ROLE_ARN` — Secrets are encrypted at rest, masked in workflow
+  logs, and not visible again through the UI/API once saved, unlike
+  Variables. Set it under Settings → Secrets and variables → Actions →
+  **Secrets**. **`terraform plan`/`apply` fails without this set** —
+  the corresponding Terraform variable, `budget_notification_email`,
+  has no default on purpose.
 
 No AWS Access Keys exist anywhere in this setup — `deploy.yml` and
 `run-pipeline.yml` both authenticate via
@@ -61,6 +72,27 @@ If this fails, see `troubleshooting.md`.
 3. **Deploy never runs any pipeline.** No `StartExecution` call exists
    in `deploy.yml`. To actually run something, see "First safe run"
    below or `operations.md`.
+
+## A note on `budget_currency`
+
+`budget.tf`'s cost budget defaults to `budget_currency = "EUR"`. AWS
+Budgets accepts EUR (it's not blocked), but AWS's own billing/reporting
+tools (Budgets, Cost Explorer, Cost and Usage Report) track the
+underlying cost data internally in USD regardless of what currency you
+picked, and convert to a non-USD budget currency using AWS's own
+periodically-updated exchange rate — not necessarily the same rate or
+timing your actual invoice uses. In practice this means a EUR budget
+is a close approximation of your real EUR spend, not an exact mirror
+of it. Before relying on the 20 EUR figure precisely:
+
+- Check your account's actual billing currency in Billing Console →
+  Payment preferences.
+- If it's USD (the common default for most standalone AWS accounts)
+  and you want an exact-currency match instead of an approximation,
+  set `budget_currency = "USD"` and pick your own equivalent
+  `budget_limit_amount` — this project doesn't hardcode an EUR→USD
+  conversion rate, since a fixed rate baked into Terraform would drift
+  out of date and give false precision.
 
 ## First safe run
 
