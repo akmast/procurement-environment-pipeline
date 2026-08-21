@@ -121,7 +121,7 @@ variable "budget_limit_amount" {
 variable "budget_currency" {
   description = "ISO 4217 currency code for the monthly budget limit, e.g. \"EUR\" or \"USD\". AWS Budgets/Cost Explorer track underlying cost data in USD internally and convert to a non-USD budget currency using AWS's own periodically-updated exchange rate, not necessarily the rate/timing your actual invoice uses — a non-USD budget is a close approximation, not an exact mirror of your bill. Verify your account's real billing currency in Billing Console → Payment preferences before relying on this figure precisely (see docs/aws/operations.md)."
   type        = string
-  default     = "EUR"
+  default     = "USD"
 }
 
 variable "budget_notification_email" {
