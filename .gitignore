@@ -216,3 +216,33 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project data
+data/
+
+# Logs
+logs/
+*.log
+
+# macOS
+.DS_Store
+
+# Local secrets / configs
+.env.*
+!.env.example
+
+# Local editor settings
+.vscode/
+.idea/
+
+# Terraform local state/cache and real variable files — never commit a
+# real terraform.tfvars (may contain the budget notification email or
+# other locally-overridden values); infrastructure/terraform/terraform.tfvars.example
+# is the only .tfvars file meant to be tracked.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
