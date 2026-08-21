@@ -75,7 +75,7 @@ If this fails, see `troubleshooting.md`.
 
 ## A note on `budget_currency`
 
-`budget.tf`'s cost budget defaults to `budget_currency = "EUR"`. AWS
+`budget.tf`'s cost budget defaults to `budget_currency = "USD"`. AWS
 Budgets accepts EUR (it's not blocked), but AWS's own billing/reporting
 tools (Budgets, Cost Explorer, Cost and Usage Report) track the
 underlying cost data internally in USD regardless of what currency you
