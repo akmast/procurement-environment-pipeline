@@ -15,7 +15,7 @@ budget_notification_email = "you@example.com"
 
 # --- AWS Budgets — cost monitoring only, never disables resources ---
 budget_limit_amount = 20
-budget_currency     = "EUR" # verify this matches your account's real billing currency — see docs/aws/operations.md
+budget_currency     = "USD"
 
 # --- Everything else below matches variables.tf's defaults; override only if needed ---
 # aws_region                   = "eu-central-1"
