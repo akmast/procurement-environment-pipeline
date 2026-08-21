@@ -58,7 +58,7 @@ resource "aws_route_table_association" "public" {
 
 resource "aws_security_group" "pipeline_task" {
   name        = "${local.name_prefix}-task"
-  description = "Fargate pipeline task security group — outbound only, no inbound rules at all."
+  description = "Fargate pipeline task security group - outbound only, no inbound rules at all."
   vpc_id      = aws_vpc.pipeline.id
 
   egress {

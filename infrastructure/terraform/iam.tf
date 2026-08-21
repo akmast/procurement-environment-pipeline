@@ -349,6 +349,19 @@ resource "aws_iam_role_policy" "github_deploy" {
         Resource = ["*"]
       },
       {
+        # AWS Budgets uses a coarse-grained permission model — ViewBudget
+        # covers reads/describes, ModifyBudget covers create/update/delete
+        # (see budget.tf). Missed when budget.tf was first added; this is
+        # what "AccessDeniedException ... budgets:ModifyBudget" means.
+        Sid    = "ManageBudget"
+        Effect = "Allow"
+        Action = [
+          "budgets:ViewBudget",
+          "budgets:ModifyBudget",
+        ]
+        Resource = ["arn:aws:budgets::${var.aws_account_id}:budget/*"]
+      },
+      {
         Sid    = "ManageNetworking"
         Effect = "Allow"
         Action = [
