@@ -1,0 +1,38 @@
+# Example variable values — copy to terraform.tfvars (gitignored) for a
+# local apply, or override the same names via -var/-var-file/TF_VAR_*.
+# Everything below already has a safe default in variables.tf except
+# budget_notification_email, which is required and has no default —
+# Terraform will refuse to plan/apply without it.
+#
+# In CI (deploy.yml), budget_notification_email comes from the
+# BUDGET_NOTIFICATION_EMAIL GitHub repo *Secret* (not a Variable — it's
+# personal data, not a system credential, but still not something to
+# leave plainly readable) via TF_VAR_budget_notification_email — this
+# file is not read by deploy.yml, it's for local/manual use only.
+
+# --- Required, no default ---
+budget_notification_email = "you@example.com"
+
+# --- AWS Budgets — cost monitoring only, never disables resources ---
+budget_limit_amount = 20
+budget_currency     = "EUR" # verify this matches your account's real billing currency — see docs/aws/operations.md
+
+# --- Everything else below matches variables.tf's defaults; override only if needed ---
+# aws_region                   = "eu-central-1"
+# aws_account_id                = "137307166874"
+# project_name                  = "procurement-environment-pipeline"
+# data_bucket_name               = "procurement-pipeline-137307166874-eu-central-1"
+# ecr_repository_name            = "procurement-environment-pipeline"
+# github_owner                   = "akmast"
+# github_repo                    = "procurement-environment-pipeline"
+# github_deploy_role_name        = "GitHubDeployRole"
+# fargate_cpu                    = 1024
+# fargate_memory                 = 4096
+# fargate_ephemeral_storage_gb   = 30
+# log_retention_days             = 90
+# vpc_cidr                       = "10.42.0.0/16"
+# public_subnet_cidrs            = ["10.42.1.0/24", "10.42.2.0/24"]
+# availability_zones             = ["eu-central-1a", "eu-central-1b"]
+# update_schedule_expression     = "cron(0 3 ? * MON#1 *)"
+# update_schedule_timezone       = "Europe/Berlin"
+# update_schedule_enabled        = false

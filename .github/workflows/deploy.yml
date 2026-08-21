@@ -1,0 +1,127 @@
+name: Deploy
+
+# Triggers on every push/merge to main. Never runs the historical
+# pipeline or the bootstrap-reference pipeline — this workflow only
+# deploys infrastructure and the Docker image, see run-pipeline.yml for
+# actually starting a pipeline run.
+on:
+  push:
+    branches: [main]
+
+# id-token: write is required for GitHub OIDC — no long-lived AWS
+# Access Keys are used anywhere in this workflow.
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  TF_DIR: infrastructure/terraform
+  ECR_REPOSITORY: procurement-environment-pipeline
+  # Required Terraform variable with no default (see variables.tf) — read
+  # from a GitHub Actions Secret, not a Variable: an email address isn't
+  # a system credential, but it's still personal data that shouldn't be
+  # plainly readable by anyone with repo settings access or accidentally
+  # unmasked in a log line the way a Variable would be. Terraform picks
+  # up any TF_VAR_<name> env var automatically. Set this under Settings →
+  # Secrets and variables → Actions → Secrets (not Variables) →
+  # BUDGET_NOTIFICATION_EMAIL before the first deploy — see docs/aws/deployment.md.
+  TF_VAR_budget_notification_email: ${{ secrets.BUDGET_NOTIFICATION_EMAIL }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Bootstrap Terraform state backend (idempotent)
+        run: bash infrastructure/bootstrap/bootstrap-state-backend.sh
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10.5"
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -backend-config=backend.hcl -input=false
+
+      - name: Terraform fmt check
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform fmt -check -recursive
+
+      - name: Terraform validate
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform validate
+
+      - name: Terraform plan (preview only — not applied as-is, see below)
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform plan -input=false
+
+      # First-deployment ordering: the ECR repository must exist before
+      # an image can be pushed to it, and the image must exist before
+      # the task definition below can reference its exact tag — so ECR
+      # is created (or confirmed to already exist, on every later
+      # deploy) in its own apply, before build/push.
+      - name: Ensure ECR repository exists
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform apply -input=false -auto-approve -target=aws_ecr_repository.pipeline
+
+      - name: Log in to ECR
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          aws ecr get-login-password --region "${AWS_REGION}" \
+            | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+      - name: Build and push image (tagged by Git commit SHA)
+        id: image
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          IMAGE_TAG="sha-$(git rev-parse --short=12 HEAD)"
+          IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${IMAGE_TAG}"
+          docker build -t "${IMAGE_URI}" .
+          docker push "${IMAGE_URI}"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "image_uri=${IMAGE_URI}" >> "$GITHUB_OUTPUT"
+
+      # Registers a new ECS task definition revision referencing the
+      # image just pushed (ECS task definitions are immutable per
+      # revision, so this is inherently safe/reproducible — nothing is
+      # overwritten, a new revision is created and the family's "latest"
+      # pointer moves to it). Also creates/updates every other resource
+      # (S3, IAM, network, Step Functions, EventBridge Scheduler) on the
+      # very first deploy.
+      - name: Terraform apply
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          IMAGE_TAG: ${{ steps.image.outputs.image_tag }}
+        run: terraform apply -input=false -auto-approve -var="container_image_tag=${IMAGE_TAG}"
+
+      - name: Deployment summary
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          IMAGE_TAG: ${{ steps.image.outputs.image_tag }}
+          IMAGE_URI: ${{ steps.image.outputs.image_uri }}
+        run: |
+          {
+            echo "## Deployment summary"
+            echo "- Image: \`${IMAGE_URI}\`"
+            echo "- Image tag: \`${IMAGE_TAG}\`"
+            echo ""
+            echo "### Terraform outputs"
+            echo '```'
+            terraform output
+            echo '```'
+            echo ""
+            echo "Schedule state: verify \`monthly_update_schedule_state\` above reads DISABLED unless you already enabled it on purpose."
+          } >> "$GITHUB_STEP_SUMMARY"
