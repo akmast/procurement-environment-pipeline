@@ -5,17 +5,31 @@
   country.
 - NUTS codes with a letter after the country prefix (e.g. "DED51",
   "PL22C") being misread as unrecognized.
+- a multi-element buyer-country list left as a raw Python list in what
+  pyarrow expected to be a plain string column ("ArrowTypeError:
+  Expected bytes, got a 'list' object") — every column must hold one
+  stable type across all rows.
 """
+import json
 import logging
 from datetime import date
 
+import pandas as pd
 import pytest
 
 from normalization.ted.notices import (
     ISO3_PATTERN,
+    LIST_COLUMNS,
+    NOTICES_RAW_FILENAME,
     NUTS_PATTERN,
+    RAW_BASE_DIR,
+    flatten_notice,
     parse_ted_date,
+    run,
     split_place_of_performance,
+    unwrap_multi,
+    unwrap_required_scalar,
+    validate_column_types,
 )
 
 
@@ -110,3 +124,135 @@ class TestSplitPlaceOfPerformance:
         assert nuts_codes == []
         assert country_codes == []
         assert "Unrecognized place-of-performance value" in caplog.text
+
+
+# --------------------------------------------------------------------------
+# Field type stability — missing / scalar / single-element / multi-element,
+# for both the "must always be scalar" and "must always be a list" helpers.
+# --------------------------------------------------------------------------
+
+class TestUnwrapRequiredScalar:
+    @pytest.mark.parametrize("raw,expected", [
+        (None, None),
+        ([], None),
+        ("can-standard", "can-standard"),          # bare scalar (defensive; not TED's normal shape)
+        (["can-standard"], "can-standard"),        # single-element list — TED's normal shape
+    ])
+    def test_missing_scalar_and_single_element(self, raw, expected):
+        assert unwrap_required_scalar(raw, "notice_type") == expected
+
+    def test_multi_element_is_joined_and_logged_not_silently_truncated(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            result = unwrap_required_scalar(["can-standard", "can-social"], "notice_type")
+        assert result == "can-standard; can-social"
+        assert "Expected a single value for notice_type" in caplog.text
+
+
+class TestUnwrapMulti:
+    @pytest.mark.parametrize("raw,expected", [
+        (None, []),
+        ([], []),
+        ("DEU", ["DEU"]),           # bare scalar (defensive)
+        (["DEU"], ["DEU"]),         # single-element list — TED's usual shape
+        (["DEU", "POL"], ["DEU", "POL"]),  # genuine multi-value (joint procurement)
+    ])
+    def test_missing_scalar_single_and_multi_element(self, raw, expected):
+        assert unwrap_multi(raw) == expected
+
+
+class TestFlattenNoticeBuyerCountry:
+    @pytest.mark.parametrize("raw,expected", [
+        (None, []),
+        (["DEU"], ["DEU"]),
+        (["DEU", "POL"], ["DEU", "POL"]),
+    ])
+    def test_buyer_country_is_always_a_list(self, raw, expected):
+        notice = {"publication-number": ["1-2025"]} if raw is None else {
+            "publication-number": ["1-2025"], "buyer-country": raw,
+        }
+        row = flatten_notice(notice, "DE")
+        assert row["buyer_country"] == expected
+        assert isinstance(row["buyer_country"], list)
+
+    def test_other_fields_stay_scalar_even_when_wrapped(self):
+        notice = {
+            "publication-number": ["1-2025"],
+            "notice-type": ["can-standard"],
+            "buyer-post-code": ["10115"],
+            "winner-selection-status": ["comp-winner"],
+            "total-value-cur": ["EUR"],
+        }
+        row = flatten_notice(notice, "DE")
+        for field in ["publication_number", "notice_type", "buyer_post_code",
+                       "winner_selection_status", "total_value_currency"]:
+            assert not isinstance(row[field], list), f"{field} must not be a list"
+        assert row["publication_number"] == "1-2025"
+        assert row["notice_type"] == "can-standard"
+
+
+class TestValidateColumnTypes:
+    def test_passes_on_well_typed_dataframe(self):
+        df = pd.DataFrame([
+            {"publication_number": "1-2025", "buyer_country": ["DEU"]},
+            {"publication_number": "2-2025", "buyer_country": ["DEU", "POL"]},
+            {"publication_number": "3-2025", "buyer_country": []},
+        ])
+        # only buyer_country is a real LIST_COLUMNS member here; treat
+        # publication_number as the representative "must stay scalar" column
+        validate_column_types(df[["publication_number", "buyer_country"]])
+
+    def test_raises_naming_column_and_type_for_list_in_scalar_column(self):
+        df = pd.DataFrame([{"publication_number": "1-2025"}, {"publication_number": ["1-2025", "2-2025"]}])
+        with pytest.raises(TypeError, match="publication_number.*list"):
+            validate_column_types(df)
+
+    def test_raises_naming_column_and_type_for_scalar_in_list_column(self):
+        df = pd.DataFrame([{"buyer_country": ["DEU"]}, {"buyer_country": "DEU"}])
+        with pytest.raises(TypeError, match="buyer_country.*str"):
+            validate_column_types(df)
+
+    def test_list_columns_constant_matches_known_fields(self):
+        assert LIST_COLUMNS == {
+            "buyer_country", "classification_cpv", "green_procurement_criteria",
+            "nuts_codes", "place_of_performance_country",
+        }
+
+
+# --------------------------------------------------------------------------
+# End-to-end: run() writes and reads back a real Parquet file without
+# ArrowTypeError, for the exact shapes that used to crash it.
+# --------------------------------------------------------------------------
+
+def write_raw_notices(tmp_path, monkeypatch, notices, country="DE"):
+    monkeypatch.setattr("common.storage.PROJECT_ROOT", tmp_path)
+    raw_path = f"{RAW_BASE_DIR}/{country}/{NOTICES_RAW_FILENAME}"
+    full_path = tmp_path / raw_path
+    full_path.parent.mkdir(parents=True, exist_ok=True)
+    full_path.write_text("\n".join(json.dumps(n) for n in notices), encoding="utf-8")
+    return raw_path
+
+
+class TestRunWritesAndReadsParquet:
+    def test_mixed_missing_single_and_multi_buyer_country_round_trips(self, tmp_path, monkeypatch):
+        notices = [
+            {"publication-number": ["1-2025"], "notice-type": ["can-standard"]},  # missing buyer-country
+            {"publication-number": ["2-2025"], "notice-type": ["can-standard"], "buyer-country": ["DEU"]},
+            {"publication-number": ["3-2025"], "notice-type": ["can-standard"],
+             "buyer-country": ["DEU", "POL"]},
+        ]
+        write_raw_notices(tmp_path, monkeypatch, notices)
+
+        result = run(storage_mode="local", countries=["DE"])
+
+        assert result.status != "FAILED"
+        assert result.failed_paths == []
+        assert len(result.written_paths) == 1
+
+        written = tmp_path / result.written_paths[0]
+        assert written.exists()
+        df = pd.read_parquet(written)
+        assert len(df) == 3
+        by_pub = df.set_index("publication_number")
+        assert list(by_pub.loc["1-2025", "buyer_country"]) == []
+        assert list(by_pub.loc["2-2025", "buyer_country"]) == ["DEU"]
+        assert list(by_pub.loc["3-2025", "buyer_country"]) == ["DEU", "POL"]

@@ -6,18 +6,35 @@ per country, data/raw/ted/<country>/notices.jsonl — and reshapes each
 notice into one row of a compact analytical table, written to
 data/normalized/ted/<country>/notices.parquet. This is a real schema
 change from a straight raw copy: TED's response wraps almost every
-field in a single-element list (even genuinely scalar ones like
-buyer-country), multilingual fields as {lang: [value]} dicts, and mixes
-NUTS + ISO3 country codes together inside place-of-performance — none of
-that survives untouched here; each is resolved into a proper typed
-column, based on real response shapes confirmed via live ingestion
-output (2026-08-20), not guessed.
+field in a single-element list, multilingual fields as {lang: [value]}
+dicts, and mixes NUTS + ISO3 country codes together inside
+place-of-performance — none of that survives untouched here; each is
+resolved into a proper typed column, based on real response shapes
+confirmed via live ingestion output (2026-08-20), not guessed.
+
+Every output column has one stable dtype across all rows, never a mix
+of a plain scalar and a list — pyarrow can't write that ("Expected
+bytes, got a 'list' object"), and it silently corrupted buyer_country
+before this was fixed. Two helpers enforce this per field (see below):
+unwrap_required_scalar() for fields this project's data model treats as
+genuinely single-valued (never leaves a list in the column — a
+surprise multi-value notice gets its values joined into one string and
+logged, not silently truncated to the first), and unwrap_multi() for
+fields that can genuinely repeat (always a list, even for a single
+value). validate_column_types() double-checks every column against
+LIST_COLUMNS right before to_parquet(), so a violation fails loudly
+with the specific column name and offending type instead of pyarrow's
+less specific error.
 
 Key real-data findings that shaped this:
 - Fields absent from a notice are OMITTED by TED entirely, not present
   as null/empty — every field access below is defensive (.get()).
 - Almost all "scalar" business terms are still wrapped in a
-  single-element list (e.g. "buyer-country": ["DEU"]) — unwrapped here.
+  single-element list (e.g. "total-value-cur": ["EUR"]) — unwrapped
+  here. `buyer-country` looks the same shape (e.g. ["DEU"]) but is NOT
+  always single-valued — a joint-procurement notice can list more than
+  one buyer country, confirmed live — so it's kept as a list
+  (unwrap_multi()), not unwrapped to a scalar.
 - Multilingual fields (buyer-name, winner-name, notice-title,
   buyer-city) are {lang: [value, ...]} — resolved to one string per
   notice via LANG_PREFERENCE below, not kept as a nested structure.
@@ -44,7 +61,7 @@ Key real-data findings that shaped this:
 
 `country_code` is this project's own ISO2 code (from the file's own
 directory) — a different code space from `buyer_country` (TED's own
-ISO3 field, kept as returned).
+ISO3 field(s), kept as a list of however many the notice returned).
 
 `countries` must be passed explicitly — run() never defaults to scanning
 and processing every country on disk. Pass discover_countries(storage_mode)
@@ -120,9 +137,16 @@ def unwrap_scalar(value):
     """
     TED wraps almost every field in a list, even genuinely scalar ones.
     A single-element list becomes its element; an empty list becomes
-    None; a multi-element list is returned as-is (real multiplicity —
-    not expected for the fields this is used on, but not discarded if
-    it happens).
+    None; a multi-element list is returned **as a list** — this is the
+    one case that must never reach a DataFrame column directly: it would
+    leave that column holding a mix of plain scalars and lists, which
+    pyarrow can't write ("Expected bytes, got a 'list' object"). Only
+    used internally by parse_ted_date() (which explicitly handles the
+    still-a-list case itself) and extract_total_value() (a no-op safety
+    net on a field never observed list-wrapped). Every field written
+    straight into flatten_notice()'s output row uses
+    unwrap_required_scalar() or unwrap_multi() below instead — never
+    this function directly.
     """
     if isinstance(value, list):
         if len(value) == 1:
@@ -131,6 +155,47 @@ def unwrap_scalar(value):
             return None
         return value
     return value
+
+
+def unwrap_required_scalar(value, field_name: str):
+    """
+    For fields this project's data model treats as genuinely
+    single-valued per notice (e.g. notice_type, winner_selection_status
+    — a controlled code, one per notice). Always returns a plain scalar
+    or None — never a list — so the column stays a stable, single-typed
+    string column even on the rare notice where TED sends more values
+    than expected: rather than silently keeping only value[0] (discarding
+    real data) or leaving a list in the column (breaking to_parquet()),
+    every value is kept, joined into one string (same "; " convention as
+    resolve_language_field's multi-value case), and logged so the
+    anomaly isn't silently invisible.
+    """
+    if isinstance(value, list):
+        if len(value) == 0:
+            return None
+        if len(value) == 1:
+            return value[0]
+        logger.warning("Expected a single value for %s, got %d — joining | raw=%s",
+                        field_name, len(value), value)
+        return "; ".join(str(v) for v in value)
+    return value
+
+
+def unwrap_multi(value) -> list:
+    """
+    For fields this project's data model treats as potentially
+    multi-valued per notice (e.g. buyer_country — a joint-procurement
+    notice can list more than one buyer country). Always returns a
+    list — never a bare scalar — so the column stays list-typed even on
+    a file where every notice in it happens to have exactly one value;
+    a bare scalar becomes a single-element list, missing/empty becomes
+    [].
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return list(value)
+    return [value]
 
 
 def resolve_language_field(value) -> str | None:
@@ -241,7 +306,7 @@ def extract_non_award_justification(notice: dict) -> str | None:
     code, e.g. ["ins-fund"] — same shape as winner-selection-status.
     It's a controlled code list (BT-144, see ingestion.ted.codelists).
     """
-    return unwrap_scalar(notice.get("non-award-justification"))
+    return unwrap_required_scalar(notice.get("non-award-justification"), "non_award_justification")
 
 
 def extract_green_procurement_criteria(notice: dict) -> list[str]:
@@ -268,19 +333,23 @@ def flatten_notice(notice: dict, country: str) -> dict:
 
     return {
         "country_code": country,
-        "publication_number": notice.get("publication-number"),
-        "notice_type": notice.get("notice-type"),
+        "publication_number": unwrap_required_scalar(notice.get("publication-number"), "publication_number"),
+        "notice_type": unwrap_required_scalar(notice.get("notice-type"), "notice_type"),
         "notice_title": resolve_language_field(notice.get("notice-title")),
         "publication_date": parse_ted_date(notice.get("publication-date")),
         "contract_conclusion_date": parse_ted_date(notice.get("contract-conclusion-date")),
         "buyer_name": resolve_language_field(notice.get("buyer-name")),
-        "buyer_country": unwrap_scalar(notice.get("buyer-country")),
+        # Potentially multi-valued (a joint-procurement notice can list
+        # more than one buyer country) — always a list, see unwrap_multi().
+        "buyer_country": unwrap_multi(notice.get("buyer-country")),
         "buyer_city": resolve_language_field(notice.get("buyer-city")),
-        "buyer_post_code": unwrap_scalar(notice.get("buyer-post-code")),
+        "buyer_post_code": unwrap_required_scalar(notice.get("buyer-post-code"), "buyer_post_code"),
         "winner_name": resolve_language_field(notice.get("winner-name")),
-        "winner_selection_status": unwrap_scalar(notice.get("winner-selection-status")),
+        "winner_selection_status": unwrap_required_scalar(
+            notice.get("winner-selection-status"), "winner_selection_status"
+        ),
         "total_value": extract_total_value(notice),
-        "total_value_currency": unwrap_scalar(notice.get("total-value-cur")),
+        "total_value_currency": unwrap_required_scalar(notice.get("total-value-cur"), "total_value_currency"),
         "classification_cpv": dedupe_preserve_order(notice.get("classification-cpv")),
         "non_award_justification": extract_non_award_justification(notice),
         "green_procurement_criteria": extract_green_procurement_criteria(notice),
@@ -291,6 +360,41 @@ def flatten_notice(notice: dict, country: str) -> dict:
         "nuts_codes": nuts_codes,
         "place_of_performance_country": place_country_codes,
     }
+
+
+# Columns that must always hold a list (or None/NaN for a row with no
+# data at all) — every other column must always hold a scalar. Checked
+# by validate_column_types() right before to_parquet(), see run().
+LIST_COLUMNS = frozenset({
+    "buyer_country", "classification_cpv", "green_procurement_criteria",
+    "nuts_codes", "place_of_performance_country",
+})
+
+
+def validate_column_types(df: pd.DataFrame) -> None:
+    """
+    Fails loudly, naming the exact column and the unexpected Python type,
+    before to_parquet() ever sees inconsistent data — pyarrow's own
+    ArrowTypeError names the column but not the offending value's actual
+    type, which is exactly what made the original bug (a list sneaking
+    into what pyarrow expected to be a plain string column) slow to
+    root-cause. A LIST_COLUMNS column must hold only list (or None); any
+    other column must never hold a list.
+    """
+    for column in df.columns:
+        is_list_column = column in LIST_COLUMNS
+        for value in df[column]:
+            if value is None:
+                continue
+            if is_list_column and not isinstance(value, list):
+                raise TypeError(
+                    f"Column {column!r} is expected to hold lists, but contains "
+                    f"{type(value).__name__}: {value!r}"
+                )
+            if not is_list_column and isinstance(value, list):
+                raise TypeError(
+                    f"Column {column!r} is expected to hold scalars, but contains a list: {value!r}"
+                )
 
 
 def run(storage_mode: str = "local", countries: list[str] | None = None) -> StageResult:
@@ -327,6 +431,7 @@ def run(storage_mode: str = "local", countries: list[str] | None = None) -> Stag
                 continue
 
             df = pd.DataFrame(rows)
+            validate_column_types(df)
             buffer = BytesIO()
             df.to_parquet(buffer, index=False)
             write_bytes(normalized_path, buffer.getvalue(), storage_mode)
