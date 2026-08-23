@@ -1,5 +1,5 @@
 {
-  "Comment": "Manual-only historical backfill for the requested source families in parallel. Never triggered by a schedule — only via workflow_dispatch (run-pipeline.yml) or a manual StartExecution. External input: {\"sources\": [\"eea\", \"ted\", \"eurostat\"], \"countries_csv\": \"DE,PL\", \"from_year\": 2021, \"to_year\": 2025} — TED's date-based API gets from_year/to_year translated to from_date/to_date internally (Python-equivalent logic, done here in ASL via States.Format, not duplicated business logic — just year-to-date-string formatting).",
+  "Comment": "Manual-only historical backfill for the requested source families in parallel. Never triggered by a schedule — only via workflow_dispatch (run-pipeline.yml) or a manual StartExecution. External input: {\"sources\": [\"eea\", \"ted\", \"eurostat\"], \"countries_csv\": \"DE,PL\", \"from_year\": 2021, \"to_year\": 2025} — TED's date-based API gets from_year/to_year translated to from_date/to_date internally (Python-equivalent logic, done here in ASL via States.Format, not duplicated business logic — just year-to-date-string formatting). Optional resume fields: \"run_id\" (reuse a previous execution's run_id instead of generating a new one — this is what makes resume work at all, since every stage's manifest already lives at a run_id-keyed S3 path) and \"start_stage\" (\"ingestion\" default / \"normalization\" / \"transformation\" — skips the earlier RunTask states for every requested source and jumps straight to that stage, reading the prior stage's own manifest at runs/<run_id>/<source>/<prior_stage>.json as --input-manifest, same as the normal chaining does). Only pass start_stage together with a matching run_id — resuming without reusing the original run_id has no prior manifest to read.",
   "StartAt": "CheckBootstrapComplete",
   "States": {
     "CheckBootstrapComplete": {
@@ -33,12 +33,20 @@
       "Catch": [
         { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "BootstrapIncomplete" }
       ],
-      "Next": "GenerateRunId"
+      "Next": "RunIdProvided"
     },
     "BootstrapIncomplete": {
       "Type": "Fail",
       "Error": "BootstrapIncomplete",
       "Cause": "Bootstrap reference data is missing or incomplete — run BootstrapReferenceStateMachine first (see docs/aws/operations.md)."
+    },
+    "RunIdProvided": {
+      "Type": "Choice",
+      "Comment": "A resume: caller supplied run_id (see the state machine's top-level Comment) — reuse it and honor start_stage instead of generating a fresh run_id and starting every requested source at ingestion.",
+      "Choices": [
+        { "Variable": "$.run_id", "IsPresent": true, "Next": "SetRunIdFromInput" }
+      ],
+      "Default": "GenerateRunId"
     },
     "GenerateRunId": {
       "Type": "Pass",
@@ -46,16 +54,29 @@
         "run_id.$": "States.UUID()"
       },
       "ResultPath": "$.generated",
-      "Next": "SetRunId"
+      "Next": "SetRunIdFromGenerated"
     },
-    "SetRunId": {
+    "SetRunIdFromGenerated": {
       "Type": "Pass",
       "Parameters": {
         "run_id.$": "$.generated.run_id",
         "sources.$": "$.sources",
         "countries_csv.$": "$.countries_csv",
         "from_year.$": "$.from_year",
-        "to_year.$": "$.to_year"
+        "to_year.$": "$.to_year",
+        "start_stage": "ingestion"
+      },
+      "Next": "RunSources"
+    },
+    "SetRunIdFromInput": {
+      "Type": "Pass",
+      "Parameters": {
+        "run_id.$": "$.run_id",
+        "sources.$": "$.sources",
+        "countries_csv.$": "$.countries_csv",
+        "from_year.$": "$.from_year",
+        "to_year.$": "$.to_year",
+        "start_stage.$": "$.start_stage"
       },
       "Next": "RunSources"
     },
@@ -76,9 +97,18 @@
             "EeaRequested": {
               "Type": "Choice",
               "Choices": [
-                { "Variable": "$.check.requested", "BooleanEquals": true, "Next": "EeaRunIngestion" }
+                { "Variable": "$.check.requested", "BooleanEquals": true, "Next": "EeaCheckStartStage" }
               ],
               "Default": "EeaSkipped"
+            },
+            "EeaCheckStartStage": {
+              "Type": "Choice",
+              "Comment": "Resume support: start_stage (default \"ingestion\") skips straight to the requested stage's RunTask, which reads the prior stage's own manifest from S3 (runs/<run_id>/eea-measurements/<prior_stage>.json) via --input-manifest — present already if run_id is a reused/resumed run.",
+              "Choices": [
+                { "Variable": "$.start_stage", "StringEquals": "normalization", "Next": "EeaRunNormalization" },
+                { "Variable": "$.start_stage", "StringEquals": "transformation", "Next": "EeaRunTransformation" }
+              ],
+              "Default": "EeaRunIngestion"
             },
             "EeaRunIngestion": {
               "Type": "Task",
@@ -202,9 +232,18 @@
             "TedRequested": {
               "Type": "Choice",
               "Choices": [
-                { "Variable": "$.check.requested", "BooleanEquals": true, "Next": "TedRunIngestion" }
+                { "Variable": "$.check.requested", "BooleanEquals": true, "Next": "TedCheckStartStage" }
               ],
               "Default": "TedSkipped"
+            },
+            "TedCheckStartStage": {
+              "Type": "Choice",
+              "Comment": "Resume support: start_stage (default \"ingestion\") skips straight to the requested stage's RunTask, which reads the prior stage's own manifest from S3 (runs/<run_id>/ted-notices/<prior_stage>.json) via --input-manifest — present already if run_id is a reused/resumed run.",
+              "Choices": [
+                { "Variable": "$.start_stage", "StringEquals": "normalization", "Next": "TedRunNormalization" },
+                { "Variable": "$.start_stage", "StringEquals": "transformation", "Next": "TedRunTransformation" }
+              ],
+              "Default": "TedRunIngestion"
             },
             "TedRunIngestion": {
               "Type": "Task",
@@ -328,9 +367,17 @@
             "EurostatRequested": {
               "Type": "Choice",
               "Choices": [
-                { "Variable": "$.check.requested", "BooleanEquals": true, "Next": "EurostatRunIngestion" }
+                { "Variable": "$.check.requested", "BooleanEquals": true, "Next": "EurostatCheckStartStage" }
               ],
               "Default": "EurostatSkipped"
+            },
+            "EurostatCheckStartStage": {
+              "Type": "Choice",
+              "Comment": "Resume support: start_stage \"normalization\" skips straight to EurostatRunNormalization, reading runs/<run_id>/eurostat-agriculture-accounts/ingestion.json via --input-manifest. There is no transformation stage for this source (see main.py FAMILY_STAGES) — start_stage \"transformation\" has nothing to jump to, so it falls back to the full ingestion->normalization run like the default \"ingestion\".",
+              "Choices": [
+                { "Variable": "$.start_stage", "StringEquals": "normalization", "Next": "EurostatRunNormalization" }
+              ],
+              "Default": "EurostatRunIngestion"
             },
             "EurostatRunIngestion": {
               "Type": "Task",

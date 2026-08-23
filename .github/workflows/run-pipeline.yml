@@ -29,6 +29,17 @@ on:
       to_year:
         description: "End year — required for historical, ignored otherwise"
         required: false
+      run_id:
+        description: "Resume: reuse a previous run's run_id (from its execution input/manifests) instead of starting a fresh one. Ignored for bootstrap-reference. Leave empty for a normal new run."
+        required: false
+      start_stage:
+        description: "Resume: skip straight to this stage for every requested source, reading the prior stage's manifest from the reused run_id. Only meaningful together with run_id — ignored for bootstrap-reference."
+        required: false
+        type: choice
+        options:
+          - ingestion
+          - normalization
+          - transformation
 
 permissions:
   contents: read
@@ -75,6 +86,8 @@ jobs:
           COUNTRIES: ${{ inputs.countries }}
           FROM_YEAR: ${{ inputs.from_year }}
           TO_YEAR: ${{ inputs.to_year }}
+          RUN_ID: ${{ inputs.run_id }}
+          START_STAGE: ${{ inputs.start_stage }}
         run: |
           PAYLOAD=$(python3 - <<'PYEOF'
           import json
@@ -84,8 +97,13 @@ jobs:
           state_machine = os.environ["STATE_MACHINE"]
           countries_csv = ",".join(os.environ["COUNTRIES"].split())
           sources = os.environ["SOURCES"].split()
+          run_id = os.environ.get("RUN_ID", "").strip()
+          start_stage = os.environ.get("START_STAGE", "").strip()
 
           if state_machine == "bootstrap-reference":
+              if run_id or start_stage:
+                  print("run_id/start_stage are not supported for bootstrap-reference", file=sys.stderr)
+                  sys.exit(1)
               payload = {"countries_csv": countries_csv}
           elif state_machine == "update":
               payload = {"sources": sources, "countries_csv": countries_csv}
@@ -104,6 +122,19 @@ jobs:
           else:
               print(f"Unknown state_machine: {state_machine}", file=sys.stderr)
               sys.exit(1)
+
+          # Resume support (update/historical only): start_stage only makes
+          # sense together with a reused run_id — without it there's no
+          # prior stage's manifest to read (see the state machines' own
+          # top-level Comment). Fail loudly on a start_stage with no run_id
+          # rather than silently running from ingestion anyway.
+          if state_machine in ("update", "historical"):
+              if start_stage and start_stage != "ingestion" and not run_id:
+                  print("start_stage requires run_id (nothing to resume from otherwise)", file=sys.stderr)
+                  sys.exit(1)
+              if run_id:
+                  payload["run_id"] = run_id
+                  payload["start_stage"] = start_stage or "ingestion"
 
           print(json.dumps(payload))
           PYEOF
