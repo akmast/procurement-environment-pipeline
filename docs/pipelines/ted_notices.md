@@ -178,13 +178,30 @@ nuts_codes,                        # list[str] — every NUTS code found, not ju
 place_of_performance_country       # list[str] — the ISO3 entries split out of place-of-performance
 ```
 
+`buyer_country` is `list[str]` — TED can list more than one buyer
+country on a joint-procurement notice, confirmed live; kept as a list
+even for the common single-value case (`unwrap_multi()`), never a bare
+scalar, so the column has one stable type across every row (a raw list
+in what pyarrow expected to be a plain string column previously crashed
+`to_parquet()` with `ArrowTypeError: Expected bytes, got a 'list'
+object`). Every other business field above that TED wraps in a
+single-element list (`notice_type`, `buyer_post_code`,
+`winner_selection_status`, `total_value_currency`,
+`non_award_justification`, `publication_number`) is unwrapped to a
+plain scalar via `unwrap_required_scalar()` — on the rare notice where
+TED unexpectedly sends more than one value, they're joined into one
+string and logged rather than silently keeping only the first.
+`validate_column_types()` checks every column against this contract
+right before `to_parquet()`, naming the specific column and unexpected
+type if it's ever violated.
+
 `nuts`/`nuts1`/`nuts2`/`nuts3` come from the **first** NUTS code found in
 `place-of-performance` (nesting by prefix, same convention as
 `transformation.eea.stations` — see `docs/pipelines/eea_stations.md`);
 the full set is kept in `nuts_codes` so a multi-lot notice spanning
 several regions doesn't lose that information. `country_code` is this
 project's own ISO2 code (from the file's own directory) — a different
-code space from `buyer_country` (TED's own ISO3 field, kept untouched).
+code space from `buyer_country` (TED's own ISO3 field(s)).
 
 `links` (all `pdf`/`html`/`htmlDirect`/`xml` blocks — technical URLs,
 not analytical data) and most of `notice-title`'s language variants
@@ -216,7 +233,6 @@ Three fields needed a real populated sample to pin down (confirmed
    every coded field that's actually useful to interpret, without
    replacing the original code — both are kept:
    - `notice_type` → `notice_type_label`
-   - `buyer_country` → `buyer_country_label`
    - `total_value_currency` → `total_value_currency_label`
    - `winner_selection_status` → `winner_selection_status_label`
    - `non_award_justification` → `non_award_justification_label`
@@ -224,6 +240,13 @@ Three fields needed a real populated sample to pin down (confirmed
      `nuts2_label`, `nuts3_label` — all four resolved from the single
      `nuts` codelist, which lists every NUTS level in one table, so no
      separate codelist is needed per granularity.
+   - `buyer_country` → `buyer_country_labels` — `buyer_country` is
+     `list[str]` (normalization keeps it as a list since a
+     joint-procurement notice can name more than one buyer country), so
+     it's joined the same list-per-code way as the other two list
+     columns below, against the `country` codelist — a plain scalar
+     `.map()` (this project's old behavior, before `buyer_country`
+     became list-valued) can't match a list against a scalar code key.
    - `classification_cpv` → `classification_cpv_labels` — one label per
      code, same order, `None` for any code missing from the CPV
      codelist.
