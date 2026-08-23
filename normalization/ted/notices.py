@@ -91,10 +91,18 @@ NOTICES_NORMALIZED_FILENAME = "notices.parquet"
 # left.
 LANG_PREFERENCE = ["deu", "eng", "mul"]
 
-# A NUTS code is 2 letters + 1-3 digits (NUTS1 "DE7", NUTS2 "DE71",
-# NUTS3 "DE712"); a bare ISO3 country code is 3 letters with no digit
-# ("DEU") — the two shapes don't collide in practice.
-NUTS_PATTERN = re.compile(r"^[A-Z]{2}[0-9]{1,3}$")
+# A NUTS code is 2 letters (country) + 1-3 more letters/digits (NUTS1
+# "DE7"/"DEA", NUTS2 "DE71"/"DED5", NUTS3 "DE712"/"DED51"/"PL22C") —
+# most subdivisions are digits, but several countries use a letter at
+# some level too (Germany's NUTS1 states run 1-9 then A-G; some
+# countries' NUTS3 codes end in a letter, e.g. Poland's "PL22C"). A
+# bare ISO3 country code ("DEU") is also 3 letters and can have the
+# exact same shape as a 3-char letter-only NUTS1 code —
+# split_place_of_performance() below checks ISO3_PATTERN first so a
+# real ISO3 code is never misread as NUTS; the trade-off (unconfirmed
+# in real data so far) is that a bare 3-letter NUTS1 code would be read
+# as a country code instead.
+NUTS_PATTERN = re.compile(r"^[A-Z]{2}[A-Z0-9]{1,3}$")
 ISO3_PATTERN = re.compile(r"^[A-Z]{3}$")
 
 
@@ -143,9 +151,23 @@ def resolve_language_field(value) -> str | None:
 def parse_ted_date(value) -> date | None:
     """TED dates look like "2025-12-31+01:00" — a calendar date with a
     trailing UTC offset and no time component. Only the date matters
-    here, so the offset is dropped rather than converted."""
+    here, so the offset is dropped rather than converted.
+
+    Confirmed live: contract-conclusion-date occasionally arrives as
+    several dates instead of one (a genuine multi-element list, not the
+    usual single-element wrapping unwrap_scalar() unwraps) — the
+    earliest of them is used. Anything that isn't a string or a list of
+    strings (or fails to parse) is logged and treated as missing rather
+    than raising, so one bad notice doesn't fail normalization for the
+    whole country."""
     value = unwrap_scalar(value)
     if not value:
+        return None
+    if isinstance(value, list):
+        parsed = [d for d in (parse_ted_date(v) for v in value) if d is not None]
+        return min(parsed) if parsed else None
+    if not isinstance(value, str):
+        logger.warning("Unexpected TED date type | raw=%r type=%s", value, type(value).__name__)
         return None
     try:
         return date.fromisoformat(value[:10])
@@ -168,10 +190,10 @@ def split_place_of_performance(value) -> tuple[list[str], list[str]]:
     for entry in value:
         if not isinstance(entry, str):
             continue
-        if NUTS_PATTERN.match(entry):
-            nuts_codes.append(entry)
-        elif ISO3_PATTERN.match(entry):
+        if ISO3_PATTERN.match(entry):
             country_codes.append(entry)
+        elif NUTS_PATTERN.match(entry):
+            nuts_codes.append(entry)
         else:
             logger.warning("Unrecognized place-of-performance value | value=%s", entry)
     return nuts_codes, country_codes
