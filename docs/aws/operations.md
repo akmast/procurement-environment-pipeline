@@ -49,17 +49,39 @@ stream prefix `pipeline/<container>/<ecs-task-id>`.
 ## Re-running after a failure
 
 1. Check the failing state in the Step Functions execution graph —
-   its `error`/`cause` (from the `Catch` block) names what failed.
+   its `error`/`cause` (from the `Catch` block) names what failed, and
+   which source/stage it was (e.g. `TedRunNormalization`).
 2. Check that state's ECS task logs in CloudWatch for the actual
    Python traceback/error.
 3. Decide whether the fix is code (push it, wait for `deploy.yml` to
    build a new image) or data/config (e.g. a source API changed shape
    — check `docs/pipelines/*.md` for known quirks).
-4. Re-run via **Actions → Run Pipeline** with the same inputs. Each run
-   gets a fresh `run_id`; nothing about a prior failed run needs manual
-   cleanup — ingestion's own change-tracking/state means a re-run
-   naturally only processes what didn't already succeed (see
-   `docs/storage_and_incremental.md`).
+4. Re-run. Two options:
+   - **Full re-run** (default): **Actions → Run Pipeline** with the
+     same inputs, leaving `run_id`/`start_stage` empty. Each run gets
+     a fresh `run_id`; nothing about a prior failed run needs manual
+     cleanup — ingestion's own change-tracking/state means a re-run
+     naturally only reprocesses what didn't already succeed (see
+     `docs/storage_and_incremental.md`).
+   - **Resume from the failed stage**: if ingestion (or normalization)
+     for a source already completed and only a later stage failed,
+     re-running the whole chain re-executes stages that already
+     succeeded for no reason — set `run_id` to the failed execution's
+     own `run_id` (visible in its Step Functions input/output, or the
+     failing task's `--run-id` argument in its ECS logs) and
+     `start_stage` to the stage that failed (`normalization` or
+     `transformation`). The skipped earlier stages' manifests are
+     still sitting at `runs/<run_id>/<source>/<stage>.json` in S3 from
+     the original attempt, so the resumed stage picks up exactly where
+     it left off via `--input-manifest`, same as normal chaining. Note
+     AWS Step Functions' own [Redrive](https://docs.aws.amazon.com/step-functions/latest/dg/redrive-executions.html)
+     isn't useful here as-is — every source's stages share one `Catch`
+     that routes into that branch's own `*Failed` Pass state, so the
+     execution's actual failed state (from Redrive's point of view) is
+     the top-level `HistoricalFailed`/`UpdateFailed` Fail state, not
+     the specific task that failed; `run_id`/`start_stage` is the
+     practical workaround for this MVP instead of restructuring the
+     state machines to make Redrive state-accurate.
 
 ## Enabling / disabling the monthly schedule
 
