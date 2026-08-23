@@ -29,6 +29,7 @@
             "RunNutsBoundariesIngestion": {
               "Type": "Task",
               "Resource": "arn:aws:states:::ecs:runTask.sync",
+              "ResultPath": null,
               "TimeoutSeconds": 900,
               "Parameters": {
                 "LaunchType": "FARGATE",
@@ -70,6 +71,7 @@
             "RunTedCodelistsIngestion": {
               "Type": "Task",
               "Resource": "arn:aws:states:::ecs:runTask.sync",
+              "ResultPath": null,
               "TimeoutSeconds": 1800,
               "Parameters": {
                 "LaunchType": "FARGATE",
@@ -104,6 +106,7 @@
             "RunTedCodelistsNormalization": {
               "Type": "Task",
               "Resource": "arn:aws:states:::ecs:runTask.sync",
+              "ResultPath": null,
               "TimeoutSeconds": 900,
               "Parameters": {
                 "LaunchType": "FARGATE",
@@ -145,6 +148,7 @@
             "RunEeaStationsIngestion": {
               "Type": "Task",
               "Resource": "arn:aws:states:::ecs:runTask.sync",
+              "ResultPath": null,
               "TimeoutSeconds": 1800,
               "Parameters": {
                 "LaunchType": "FARGATE",
@@ -179,6 +183,7 @@
             "RunEeaStationsNormalization": {
               "Type": "Task",
               "Resource": "arn:aws:states:::ecs:runTask.sync",
+              "ResultPath": null,
               "TimeoutSeconds": 900,
               "Parameters": {
                 "LaunchType": "FARGATE",
@@ -213,6 +218,7 @@
             "RunEeaStationsTransformation": {
               "Type": "Task",
               "Resource": "arn:aws:states:::ecs:runTask.sync",
+              "ResultPath": null,
               "TimeoutSeconds": 900,
               "Parameters": {
                 "LaunchType": "FARGATE",
@@ -253,6 +259,7 @@
     "WriteBootstrapManifest": {
       "Type": "Task",
       "Resource": "arn:aws:states:::ecs:runTask.sync",
+      "ResultPath": null,
       "TimeoutSeconds": 300,
       "Comment": "Re-checks required reference outputs against real S3 state and writes system/bootstrap/reference/latest.json — the authoritative signal, independent of branch_results above (a step can report SUCCEEDED yet still leave a required file missing due to a partial/edge-case failure; this task is what actually decides COMPLETE vs INCOMPLETE).",
       "Parameters": {

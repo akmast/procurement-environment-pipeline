@@ -5,6 +5,7 @@
     "CheckBootstrapComplete": {
       "Type": "Task",
       "Resource": "arn:aws:states:::ecs:runTask.sync",
+      "ResultPath": null,
       "TimeoutSeconds": 300,
       "Comment": "Refuses to run any main-data stage if reference data (NUTS boundaries, EEA stations, TED codelists) hasn't been prepared by BootstrapReferenceStateMachine — see common/bootstrap.py.",
       "Parameters": {
@@ -86,6 +87,7 @@
             "EeaRunIngestion": {
               "Type": "Task",
               "Resource": "arn:aws:states:::ecs:runTask.sync",
+              "ResultPath": null,
               "TimeoutSeconds": 5400,
               "Parameters": {
                 "LaunchType": "FARGATE",
@@ -120,6 +122,7 @@
             "EeaRunNormalization": {
               "Type": "Task",
               "Resource": "arn:aws:states:::ecs:runTask.sync",
+              "ResultPath": null,
               "TimeoutSeconds": 3600,
               "Parameters": {
                 "LaunchType": "FARGATE",
@@ -154,6 +157,7 @@
             "EeaRunTransformation": {
               "Type": "Task",
               "Resource": "arn:aws:states:::ecs:runTask.sync",
+              "ResultPath": null,
               "TimeoutSeconds": 3600,
               "Parameters": {
                 "LaunchType": "FARGATE",
@@ -211,6 +215,7 @@
             "TedRunIngestion": {
               "Type": "Task",
               "Resource": "arn:aws:states:::ecs:runTask.sync",
+              "ResultPath": null,
               "TimeoutSeconds": 5400,
               "Parameters": {
                 "LaunchType": "FARGATE",
@@ -245,6 +250,7 @@
             "TedRunNormalization": {
               "Type": "Task",
               "Resource": "arn:aws:states:::ecs:runTask.sync",
+              "ResultPath": null,
               "TimeoutSeconds": 3600,
               "Parameters": {
                 "LaunchType": "FARGATE",
@@ -279,6 +285,7 @@
             "TedRunTransformation": {
               "Type": "Task",
               "Resource": "arn:aws:states:::ecs:runTask.sync",
+              "ResultPath": null,
               "TimeoutSeconds": 3600,
               "Parameters": {
                 "LaunchType": "FARGATE",
@@ -336,6 +343,7 @@
             "EurostatRunIngestion": {
               "Type": "Task",
               "Resource": "arn:aws:states:::ecs:runTask.sync",
+              "ResultPath": null,
               "TimeoutSeconds": 3600,
               "Parameters": {
                 "LaunchType": "FARGATE",
@@ -370,6 +378,7 @@
             "EurostatRunNormalization": {
               "Type": "Task",
               "Resource": "arn:aws:states:::ecs:runTask.sync",
+              "ResultPath": null,
               "TimeoutSeconds": 3600,
               "Parameters": {
                 "LaunchType": "FARGATE",
