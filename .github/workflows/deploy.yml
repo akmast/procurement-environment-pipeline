@@ -27,6 +27,13 @@ env:
   # Secrets and variables → Actions → Secrets (not Variables) →
   # BUDGET_NOTIFICATION_EMAIL before the first deploy — see docs/aws/deployment.md.
   TF_VAR_budget_notification_email: ${{ secrets.BUDGET_NOTIFICATION_EMAIL }}
+  # Same reasoning as above, for metabase.tf's security group — an IP
+  # address identifies you personally, so it's a Secret, not a Variable.
+  # Value must be a Terraform-readable list literal, e.g.
+  # ["203.0.113.4/32"] — set under Settings → Secrets and variables →
+  # Actions → Secrets → METABASE_ALLOWED_CIDR_BLOCKS before the first
+  # deploy — see docs/aws/deployment.md.
+  TF_VAR_metabase_allowed_cidr_blocks: ${{ secrets.METABASE_ALLOWED_CIDR_BLOCKS }}
 
 jobs:
   deploy:
