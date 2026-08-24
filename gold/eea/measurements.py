@@ -5,11 +5,12 @@ Reads every transformed measurements Parquet file
 (transformation.eea.measurements — already has station location/NUTS
 codes joined in) across every country/year/pollutant currently on disk,
 concatenates them into one table, keeps only the columns useful for
-analysis, renames `nuts1_code`/`nuts2_code`/`nuts3_code` to
-`nuts1`/`nuts2`/`nuts3` (matching the plain `nuts`/`nuts1`/`nuts2`/
-`nuts3` naming the TED Gold table uses), deduplicates exact repeat
-rows, and writes ONE combined file — no country/year/pollutant split —
-to data/gold/eea/measurements.parquet.
+analysis, renames them to Gold's own naming (see RENAME below — e.g.
+`nuts1_code`/`nuts2_code`/`nuts3_code` -> `nuts1`/`nuts2`/`nuts3`,
+matching the plain `nuts`/`nuts1`/`nuts2`/`nuts3` naming the TED Gold
+table uses), deduplicates exact repeat rows, and writes ONE combined
+file — no country/year/pollutant split — to
+data/gold/eea/measurements.parquet.
 
 Dropped relative to the transformed table: `aggregation_type` (not
 needed for Gold-level analysis).
@@ -57,7 +58,21 @@ SOURCE_COLUMNS = [
     "value", "unit", "validity", "verification", "result_time", "location",
     "nuts1_code", "nuts2_code", "nuts3_code",
 ]
-RENAME = {"nuts1_code": "nuts1", "nuts2_code": "nuts2", "nuts3_code": "nuts3"}
+RENAME = {
+    "sampling_point": "sampling_point_id",
+    "pollutant": "pollutant_code",
+    "period_start": "measurement_period_start",
+    "period_end": "measurement_period_end",
+    "value": "measurement_value",
+    "unit": "measurement_unit",
+    "validity": "validity_code",
+    "verification": "verification_code",
+    "result_time": "result_timestamp",
+    "location": "station_location",
+    "nuts1_code": "nuts1",
+    "nuts2_code": "nuts2",
+    "nuts3_code": "nuts3",
+}
 
 
 def discover_countries(storage_mode: str) -> list[str]:

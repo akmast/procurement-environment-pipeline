@@ -44,11 +44,14 @@ def test_combines_countries_selects_renames_and_writes_one_file(tmp_path, monkey
 
     df = pd.read_parquet(tmp_path / result.written_paths[0])
     assert list(df.columns) == [
-        "country_code", "sampling_point", "pollutant", "period_start", "period_end",
-        "value", "unit", "validity", "verification", "result_time", "location",
-        "nuts1", "nuts2", "nuts3",
+        "country_code", "sampling_point_id", "pollutant_code",
+        "measurement_period_start", "measurement_period_end",
+        "measurement_value", "measurement_unit", "validity_code", "verification_code",
+        "result_timestamp", "station_location", "nuts1", "nuts2", "nuts3",
     ]
     assert "aggregation_type" not in df.columns
     assert "nuts1_code" not in df.columns  # renamed to nuts1
+    assert "sampling_point" not in df.columns  # renamed to sampling_point_id
+    assert "value" not in df.columns  # renamed to measurement_value
     assert sorted(df["nuts2"]) == ["DE30", "PL22"]
     assert len(df) == 2  # both countries combined into one file

@@ -1,6 +1,6 @@
 """End-to-end test for gold/ted/notices.py: multiple transformed
 per-country Parquet files -> one combined Gold file with the requested
-columns and order (no renames for this source)."""
+columns, order, and renames."""
 from io import BytesIO
 
 import pandas as pd
@@ -44,12 +44,15 @@ def test_combines_countries_selects_columns_and_writes_one_file(tmp_path, monkey
 
     df = pd.read_parquet(tmp_path / result.written_paths[0])
     assert list(df.columns) == [
-        "country_code", "publication_number", "publication_date", "contract_conclusion_date",
-        "buyer_name", "total_value", "total_value_currency",
-        "nuts", "nuts1", "nuts2", "nuts3", "nuts_label", "nuts1_label",
+        "country_code", "notice_publication_number", "notice_publication_date",
+        "contract_conclusion_date", "buyer_name", "contract_total_value", "contract_currency_code",
+        "place_of_performance_nuts", "nuts1", "nuts2", "nuts3",
+        "place_of_performance_nuts_label", "nuts1_label",
     ]
     # list-valued fields from normalization/transformation must not leak through
     assert "buyer_country" not in df.columns
     assert "classification_cpv" not in df.columns
-    assert sorted(df["publication_number"]) == ["1-2025", "2-2025"]
+    assert "publication_number" not in df.columns  # renamed to notice_publication_number
+    assert "nuts" not in df.columns  # renamed to place_of_performance_nuts
+    assert sorted(df["notice_publication_number"]) == ["1-2025", "2-2025"]
     assert len(df) == 2  # both countries combined into one file

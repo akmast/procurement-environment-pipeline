@@ -24,36 +24,68 @@ currently normalized/transformed — see "Running it" below).
 
 ## Output columns
 
-Kept in this exact order; everything else from the precursor stage is
-dropped. `unit`/`aggregation_type`/`time_label` and TED's list-valued
-fields (`buyer_country`, `classification_cpv`,
-`place_of_performance_country`, `green_procurement_criteria`) and the
-other codelist labels are deliberately excluded — not needed for
-Gold-level analysis (and unhashable list columns would break the
-exact-row deduplication below).
+Kept in this exact order (source column name, and its Gold name if
+renamed); everything else from the precursor stage is dropped.
+`unit`/`aggregation_type`/`time_label` and TED's list-valued fields
+(`buyer_country`, `classification_cpv`, `place_of_performance_country`,
+`green_procurement_criteria`) and the other codelist labels are
+deliberately excluded — not needed for Gold-level analysis (and
+unhashable list columns would break the exact-row deduplication
+below). Renames are defined in each module's own `RENAME` dict.
 
-**Eurostat** (`geo` renamed to `nuts2`):
+**Eurostat** (`gold/eurostat/agriculture_accounts.py`):
 
-```
-country_code, freq, freq_label, am_item, am_item_label,
-indic_agr, indic_agr_label, unit_label, nuts2, geo_label, time, value
-```
+| Source column | Gold column |
+|---|---|
+| `country_code` | `country_code` |
+| `freq` | `frequency_code` |
+| `freq_label` | `frequency_label` |
+| `am_item` | `agricultural_item_code` |
+| `am_item_label` | `agricultural_item_label` |
+| `indic_agr` | `agricultural_indicator_code` |
+| `indic_agr_label` | `agricultural_indicator_label` |
+| `unit_label` | `unit_label` |
+| `geo` | `nuts2` |
+| `geo_label` | `nuts2_label` |
+| `time` | `reference_year` |
+| `value` | `indicator_value` |
 
-**EEA** (`nuts1_code`/`nuts2_code`/`nuts3_code` renamed to `nuts1`/`nuts2`/`nuts3`):
+**EEA** (`gold/eea/measurements.py`):
 
-```
-country_code, sampling_point, pollutant, period_start, period_end,
-value, unit, validity, verification, result_time, location,
-nuts1, nuts2, nuts3
-```
+| Source column | Gold column |
+|---|---|
+| `country_code` | `country_code` |
+| `sampling_point` | `sampling_point_id` |
+| `pollutant` | `pollutant_code` |
+| `period_start` | `measurement_period_start` |
+| `period_end` | `measurement_period_end` |
+| `value` | `measurement_value` |
+| `unit` | `measurement_unit` |
+| `validity` | `validity_code` |
+| `verification` | `verification_code` |
+| `result_time` | `result_timestamp` |
+| `location` | `station_location` |
+| `nuts1_code` | `nuts1` |
+| `nuts2_code` | `nuts2` |
+| `nuts3_code` | `nuts3` |
 
-**TED** (no renames):
+**TED** (`gold/ted/notices.py`):
 
-```
-country_code, publication_number, publication_date, contract_conclusion_date,
-buyer_name, total_value, total_value_currency,
-nuts, nuts1, nuts2, nuts3, nuts_label, nuts1_label
-```
+| Source column | Gold column |
+|---|---|
+| `country_code` | `country_code` |
+| `publication_number` | `notice_publication_number` |
+| `publication_date` | `notice_publication_date` |
+| `contract_conclusion_date` | `contract_conclusion_date` |
+| `buyer_name` | `buyer_name` |
+| `total_value` | `contract_total_value` |
+| `total_value_currency` | `contract_currency_code` |
+| `nuts` | `place_of_performance_nuts` |
+| `nuts1` | `nuts1` |
+| `nuts2` | `nuts2` |
+| `nuts3` | `nuts3` |
+| `nuts_label` | `place_of_performance_nuts_label` |
+| `nuts1_label` | `nuts1_label` |
 
 ## How a build works
 

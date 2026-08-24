@@ -6,11 +6,10 @@ country/year currently on disk
 (normalization.eurostat.agriculture_accounts — eurostat has no
 transformation stage, see main.py's FAMILY_STAGES), concatenates them
 into one table, keeps only the columns useful for analysis, renames
-`geo` to `nuts2` (this dataset's `geo` dimension is always a NUTS2
-region code, e.g. "DE11" — matching the plain `nuts2` naming the EEA
-Gold table also uses), deduplicates exact repeat rows, and writes ONE
-combined file — no country/year split — to
-data/gold/eurostat/agriculture_accounts.parquet.
+them to Gold's own naming (see RENAME below — e.g. `geo` -> `nuts2`,
+this dataset's `geo` dimension is always a NUTS2 region code such as
+"DE11"), deduplicates exact repeat rows, and writes ONE combined file —
+no country/year split — to data/gold/eurostat/agriculture_accounts.parquet.
 
 Dropped relative to the normalized table: the raw `unit` code (every
 row in this dataset is `MIO_EUR`, per
@@ -60,7 +59,18 @@ SOURCE_COLUMNS = [
     "country_code", "freq", "freq_label", "am_item", "am_item_label",
     "indic_agr", "indic_agr_label", "unit_label", "geo", "geo_label", "time", "value",
 ]
-RENAME = {"geo": "nuts2"}
+RENAME = {
+    "freq": "frequency_code",
+    "freq_label": "frequency_label",
+    "am_item": "agricultural_item_code",
+    "am_item_label": "agricultural_item_label",
+    "indic_agr": "agricultural_indicator_code",
+    "indic_agr_label": "agricultural_indicator_label",
+    "geo": "nuts2",
+    "geo_label": "nuts2_label",
+    "time": "reference_year",
+    "value": "indicator_value",
+}
 
 
 def discover_countries(storage_mode: str) -> list[str]:

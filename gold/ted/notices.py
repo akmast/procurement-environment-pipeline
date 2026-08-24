@@ -5,13 +5,15 @@ Reads every transformed notices Parquet file (transformation.ted.notices
 — already deduplicated and codelist-labeled, one file per country, no
 year partitioning for this source) across every country currently on
 disk, concatenates them into one table, keeps only the columns useful
-for analysis, deduplicates exact repeat rows, and writes ONE combined
-file — no country split — to data/gold/ted/notices.parquet.
+for analysis, renames them to Gold's own naming (see RENAME below —
+e.g. `publication_number` -> `notice_publication_number`, `nuts` ->
+`place_of_performance_nuts`), deduplicates exact repeat rows, and
+writes ONE combined file — no country split — to
+data/gold/ted/notices.parquet.
 
 Kept from the transformed table: the core notice identity/value fields
 plus NUTS codes and their labels (`nuts`/`nuts1`/`nuts2`/`nuts3`,
-`nuts_label`/`nuts1_label`). No column renames — TED's own naming
-already matches Gold's contract. List-valued fields from normalization
+`nuts_label`/`nuts1_label`). List-valued fields from normalization
 (buyer_country, classification_cpv, place_of_performance_country,
 green_procurement_criteria) and the other codelist labels are
 deliberately left out of this table — not needed for Gold-level
@@ -55,12 +57,19 @@ GOLD_FILENAME = "notices.parquet"
 
 # Source-column order — a subset of transformation.ted.notices's output
 # columns (see that module's add_codelist_labels/deduplicate_notices).
-# No renames needed.
 SOURCE_COLUMNS = [
     "country_code", "publication_number", "publication_date", "contract_conclusion_date",
     "buyer_name", "total_value", "total_value_currency",
     "nuts", "nuts1", "nuts2", "nuts3", "nuts_label", "nuts1_label",
 ]
+RENAME = {
+    "publication_number": "notice_publication_number",
+    "publication_date": "notice_publication_date",
+    "total_value": "contract_total_value",
+    "total_value_currency": "contract_currency_code",
+    "nuts": "place_of_performance_nuts",
+    "nuts_label": "place_of_performance_nuts_label",
+}
 
 
 def discover_countries(storage_mode: str) -> list[str]:
@@ -85,7 +94,7 @@ def run(storage_mode: str = "local", countries: list[str] | None = None) -> Stag
                         countries, TRANSFORMED_BASE_DIR)
         return StageResult().finalize(attempted=0)
 
-    df = build_gold_table(paths, storage_mode, SOURCE_COLUMNS)
+    df = build_gold_table(paths, storage_mode, SOURCE_COLUMNS, rename=RENAME)
 
     out_path = f"{GOLD_BASE_DIR}/{GOLD_FILENAME}"
     write_gold_table(df, out_path, storage_mode)
