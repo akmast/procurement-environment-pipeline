@@ -81,6 +81,22 @@ resource "aws_s3_bucket_lifecycle_configuration" "pipeline_data" {
       days_after_initiation = 7
     }
   }
+
+  # Athena query results (athena.tf's workgroup writes here) are
+  # throwaway once read — Metabase/Athena always re-query the Gold
+  # tables directly, nothing depends on a past result staying around.
+  rule {
+    id     = "expire-old-athena-results"
+    status = "Enabled"
+
+    filter {
+      prefix = "athena-results/"
+    }
+
+    expiration {
+      days = 7
+    }
+  }
 }
 
 # Reject any non-TLS request to the data bucket — the only bucket policy

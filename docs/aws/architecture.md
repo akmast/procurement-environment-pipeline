@@ -19,6 +19,16 @@ normalization, transformation) — this layer only decides *when* and
 | Amazon S3 | Data storage (raw/normalized/transformed) + run manifests + bootstrap marker | Already the pipeline's storage abstraction (`common/storage.py`) — cloud mode is additive, not new |
 | CloudWatch Logs | Container + Step Functions execution logs | Centralized, queryable observability |
 | AWS Budgets | Monthly cost tracking + email alerts | Notification-only cost visibility, scoped to this project's `Project` tag — never disables resources (see `budget.tf`, `docs/aws/operations.md`) |
+| AWS Glue Data Catalog | Table definitions over the Gold Layer's Parquet files | Lets Athena query S3 Parquet as SQL tables without moving the data anywhere |
+| Amazon Athena | SQL query engine for Metabase's dashboard queries | Serverless, pay-per-query — no cluster to run for what is a small, infrequently-queried Gold Layer |
+| Metabase (EC2 + Docker) | Dashboard / BI tool | The one persistent, publicly-reachable resource this project runs — see `docs/aws/analytics.md` for its own network/security model |
+
+**Analytics is a separate concern from ingestion.** Glue/Athena/Metabase
+(`glue.tf`, `athena.tf`, `metabase.tf`) only ever *read* the Gold Layer
+Parquet files the pipeline above already produces — nothing in this
+layer writes back into `data/`, and none of it participates in the
+Step Functions dependency graph below. See `docs/aws/analytics.md` for
+that stack specifically.
 
 **No Lambda in the execution path.** pandas/PyArrow/Shapely workloads
 never run in Lambda (memory/time/package-size limits, and it would
