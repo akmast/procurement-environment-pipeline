@@ -77,3 +77,18 @@ output "budget_name" {
   description = "AWS Budgets cost budget name — notification-only, never auto-disables resources."
   value       = aws_budgets_budget.project_monthly_cost.name
 }
+
+output "athena_database_name" {
+  description = "Glue Catalog database holding the Gold Layer tables (eea_measurements, ted_notices, eurostat_agriculture_accounts)."
+  value       = aws_glue_catalog_database.gold.name
+}
+
+output "athena_workgroup_name" {
+  description = "Athena workgroup name — use this when connecting Metabase's Athena driver (see docs/aws/analytics.md)."
+  value       = aws_athena_workgroup.gold.name
+}
+
+output "metabase_url" {
+  description = "Metabase web UI URL — only reachable from metabase_allowed_cidr_blocks."
+  value       = "http://${aws_eip.metabase.public_ip}:3000"
+}
