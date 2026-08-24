@@ -11,11 +11,16 @@ normalization.ted.notices) and:
    doesn't rely on every upstream step staying bug-free).
 2. Joins in human-readable labels from the normalized TED codelists
    (see normalization.ted.codelists) for every coded field that's
-   actually useful to interpret: notice_type, buyer_country,
-   total_value_currency, winner_selection_status,
-   non_award_justification, nuts/nuts1/nuts2/nuts3 (all four resolved
-   from the single "nuts" codelist, which lists every NUTS level), and
-   each code in classification_cpv / place_of_performance_country. This
+   actually useful to interpret: notice_type, total_value_currency,
+   winner_selection_status, non_award_justification, nuts/nuts1/nuts2/
+   nuts3 (all four resolved from the single "nuts" codelist, which lists
+   every NUTS level), and each code in classification_cpv /
+   place_of_performance_country / buyer_country. buyer_country is a
+   list-valued column (normalization.ted.notices — a joint-procurement
+   notice can name more than one buyer country), so it's joined the
+   same list-per-code way as the other two list columns, against the
+   same "country" codelist as place_of_performance_country — producing
+   buyer_country_labels (plural), not a single buyer_country_label. This
    is the reason TED codelists get their own normalization stage — they
    exist to make these joins possible. Each codelist is loaded once per
    run and reused for every country. Not every coded field gets a join —
@@ -71,7 +76,6 @@ CODELISTS_BASE_DIR = "data/normalized/ted/codelists"
 # exists.
 CODELIST_JOINS = [
     ("notice_type", "notice-type", "notice_type_label"),
-    ("buyer_country", "country", "buyer_country_label"),
     ("total_value_currency", "currency", "total_value_currency_label"),
     ("winner_selection_status", "winner-selection-status", "winner_selection_status_label"),
     ("non_award_justification", "non-award-justification", "non_award_justification_label"),
@@ -81,9 +85,14 @@ CODELIST_JOINS = [
     ("nuts3", "nuts", "nuts3_label"),
 ]
 
-# List-column joins (classification_cpv, place_of_performance_country) —
-# one label per code, same order, handled separately from the
-# single-code joins above (see add_codelist_labels).
+# List-column joins (buyer_country, classification_cpv,
+# place_of_performance_country) — one label per code, same order,
+# handled separately from the single-code joins above (see
+# add_codelist_labels). buyer_country moved here (out of CODELIST_JOINS)
+# once normalization.ted.notices started keeping it as a list — a
+# joint-procurement notice can name more than one buyer country, and a
+# plain .map() lookup can't match a list value against a scalar code key.
+BUYER_COUNTRY_CODELIST_ID = "country"
 CPV_CODELIST_ID = "cpv"
 PLACE_COUNTRY_CODELIST_ID = "country"
 
@@ -123,7 +132,7 @@ def build_codelist_lookup(codelist_id: str, storage_mode: str) -> dict:
 
 def load_codelist_lookups(storage_mode: str) -> dict[str, dict]:
     codelist_ids = {codelist_id for _, codelist_id, _ in CODELIST_JOINS}
-    codelist_ids |= {CPV_CODELIST_ID, PLACE_COUNTRY_CODELIST_ID}
+    codelist_ids |= {BUYER_COUNTRY_CODELIST_ID, CPV_CODELIST_ID, PLACE_COUNTRY_CODELIST_ID}
     return {codelist_id: build_codelist_lookup(codelist_id, storage_mode) for codelist_id in codelist_ids}
 
 
@@ -145,6 +154,9 @@ def add_codelist_labels(df: pd.DataFrame, lookups: dict[str, dict]) -> pd.DataFr
     for source_column, codelist_id, label_column in CODELIST_JOINS:
         df[label_column] = df[source_column].map(lookups.get(codelist_id, {}))
 
+    df["buyer_country_labels"] = _label_list_column(
+        df["buyer_country"], lookups.get(BUYER_COUNTRY_CODELIST_ID, {})
+    )
     df["classification_cpv_labels"] = _label_list_column(
         df["classification_cpv"], lookups.get(CPV_CODELIST_ID, {})
     )
