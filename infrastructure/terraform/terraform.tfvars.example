@@ -43,5 +43,5 @@ budget_currency     = "USD"
 # update_schedule_enabled        = false
 # athena_database_name           = "procurement_gold"
 # metabase_instance_type         = "t3.micro"
-# metabase_volume_size_gb        = 20
+# metabase_volume_size_gb        = 30
 # metabase_image_tag             = "v0.63.14.2"

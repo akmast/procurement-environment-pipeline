@@ -155,9 +155,9 @@ variable "metabase_instance_type" {
 }
 
 variable "metabase_volume_size_gb" {
-  description = "Root EBS volume size (GiB) for the Metabase instance — holds the Docker image plus Metabase's own embedded H2 application database (dashboards, saved questions, users). Not backed by RDS; see docs/aws/analytics.md for the durability trade-off."
+  description = "Root EBS volume size (GiB) for the Metabase instance — holds the Docker image plus Metabase's own embedded H2 application database (dashboards, saved questions, users). Not backed by RDS; see docs/aws/analytics.md for the durability trade-off. Must be >= the Amazon Linux 2023 AMI's own root snapshot size (currently 30GB — AWS rejects a smaller volume with InvalidBlockDeviceMapping, e.g. 'Volume of size 20GB is smaller than snapshot ... expect size >= 30GB'); check the current AMI snapshot size before lowering this."
   type        = number
-  default     = 20
+  default     = 30
 }
 
 variable "metabase_image_tag" {
