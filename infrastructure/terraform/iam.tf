@@ -303,6 +303,7 @@ resource "aws_iam_role_policy" "github_deploy" {
           aws_iam_role.pipeline_task.arn,
           aws_iam_role.step_functions.arn,
           aws_iam_role.scheduler.arn,
+          aws_iam_role.metabase_instance.arn,
         ]
       },
       {
@@ -320,7 +321,18 @@ resource "aws_iam_role_policy" "github_deploy" {
           aws_iam_role.pipeline_task.arn,
           aws_iam_role.step_functions.arn,
           aws_iam_role.scheduler.arn,
+          aws_iam_role.metabase_instance.arn,
         ]
+      },
+      {
+        Sid    = "ManageMetabaseInstanceProfile"
+        Effect = "Allow"
+        Action = [
+          "iam:GetInstanceProfile", "iam:CreateInstanceProfile", "iam:DeleteInstanceProfile",
+          "iam:AddRoleToInstanceProfile", "iam:RemoveRoleFromInstanceProfile",
+          "iam:TagInstanceProfile",
+        ]
+        Resource = [aws_iam_instance_profile.metabase.arn]
       },
       {
         Sid      = "ManageOwnDeployPolicy"
@@ -380,6 +392,51 @@ resource "aws_iam_role_policy" "github_deploy" {
         Resource = ["*"]
       },
       {
+        # Metabase instance (metabase.tf): the instance itself, its
+        # Elastic IP, and the AMI lookup used to find the latest Amazon
+        # Linux 2023 image.
+        Sid    = "ManageMetabaseInstance"
+        Effect = "Allow"
+        Action = [
+          "ec2:DescribeInstances", "ec2:RunInstances", "ec2:TerminateInstances",
+          "ec2:StopInstances", "ec2:StartInstances", "ec2:ModifyInstanceAttribute",
+          "ec2:DescribeInstanceAttribute", "ec2:DescribeInstanceTypes",
+          "ec2:DescribeImages",
+          "ec2:DescribeVolumes", "ec2:CreateVolume", "ec2:DeleteVolume", "ec2:ModifyVolume",
+          "ec2:DescribeAddresses", "ec2:AllocateAddress", "ec2:ReleaseAddress",
+          "ec2:AssociateAddress", "ec2:DisassociateAddress",
+          "ec2:DescribeIamInstanceProfileAssociations", "ec2:AssociateIamInstanceProfile",
+          "ec2:DisassociateIamInstanceProfile", "ec2:ReplaceIamInstanceProfileAssociation",
+          "ec2:DescribeKeyPairs",
+        ]
+        Resource = ["*"]
+      },
+      {
+        # Glue Catalog (glue.tf) — database + the three Gold tables.
+        Sid    = "ManageGlueCatalog"
+        Effect = "Allow"
+        Action = [
+          "glue:GetDatabase", "glue:CreateDatabase", "glue:UpdateDatabase", "glue:DeleteDatabase",
+          "glue:GetTable", "glue:GetTables", "glue:CreateTable", "glue:UpdateTable", "glue:DeleteTable",
+          "glue:TagResource", "glue:UntagResource", "glue:GetTags",
+        ]
+        Resource = [
+          "arn:aws:glue:${var.aws_region}:${var.aws_account_id}:catalog",
+          aws_glue_catalog_database.gold.arn,
+          "arn:aws:glue:${var.aws_region}:${var.aws_account_id}:table/${aws_glue_catalog_database.gold.name}/*",
+        ]
+      },
+      {
+        # Athena workgroup (athena.tf).
+        Sid    = "ManageAthenaWorkgroup"
+        Effect = "Allow"
+        Action = [
+          "athena:GetWorkGroup", "athena:CreateWorkGroup", "athena:UpdateWorkGroup",
+          "athena:DeleteWorkGroup", "athena:TagResource", "athena:ListTagsForResource",
+        ]
+        Resource = [aws_athena_workgroup.gold.arn]
+      },
+      {
         Sid    = "ManageLogGroups"
         Effect = "Allow"
         Action = [
@@ -396,4 +453,109 @@ resource "aws_iam_role_policy" "github_deploy" {
       }
     ]
   })
+}
+
+# --------------------------------------------------------------------------
+# MetabaseInstanceRole — the Metabase EC2 instance's own runtime identity
+# (instance profile, see metabase.tf). Scoped to exactly what Metabase
+# needs to run Athena queries against the Gold Layer: submit/read Athena
+# queries, read the Glue Catalog (glue.tf), read the Gold data under S3
+# plus read/write the Athena query-results prefix (athena.tf). Also
+# carries SSM's managed-instance policy so the instance is reachable for
+# shell access via SSM Session Manager rather than an open SSH port — the
+# security group (metabase.tf) has no inbound rule for port 22 at all.
+# --------------------------------------------------------------------------
+resource "aws_iam_role" "metabase_instance" {
+  name = "MetabaseInstanceRole"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect    = "Allow"
+        Principal = { Service = "ec2.amazonaws.com" }
+        Action    = "sts:AssumeRole"
+      }
+    ]
+  })
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy_attachment" "metabase_instance_ssm" {
+  role       = aws_iam_role.metabase_instance.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_role_policy" "metabase_instance" {
+  name = "metabase-athena-glue-gold-access"
+  role = aws_iam_role.metabase_instance.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "RunAthenaQueries"
+        Effect = "Allow"
+        Action = [
+          "athena:StartQueryExecution",
+          "athena:GetQueryExecution",
+          "athena:GetQueryResults",
+          "athena:StopQueryExecution",
+          "athena:GetWorkGroup",
+          "athena:ListQueryExecutions",
+        ]
+        Resource = [aws_athena_workgroup.gold.arn]
+      },
+      {
+        Sid    = "ReadGlueCatalog"
+        Effect = "Allow"
+        Action = [
+          "glue:GetDatabase",
+          "glue:GetDatabases",
+          "glue:GetTable",
+          "glue:GetTables",
+          "glue:GetPartition",
+          "glue:GetPartitions",
+        ]
+        Resource = [
+          "arn:aws:glue:${var.aws_region}:${var.aws_account_id}:catalog",
+          aws_glue_catalog_database.gold.arn,
+          "arn:aws:glue:${var.aws_region}:${var.aws_account_id}:table/${aws_glue_catalog_database.gold.name}/*",
+        ]
+      },
+      {
+        Sid    = "ReadGoldData"
+        Effect = "Allow"
+        Action = ["s3:GetObject"]
+        Resource = [
+          "${aws_s3_bucket.pipeline_data.arn}/data/gold/*",
+        ]
+      },
+      {
+        Sid      = "ListDataBucketForAthena"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = [aws_s3_bucket.pipeline_data.arn]
+        Condition = {
+          StringLike = {
+            "s3:prefix" = ["data/gold/*", "athena-results/*"]
+          }
+        }
+      },
+      {
+        Sid      = "ReadWriteAthenaResults"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject"]
+        Resource = ["${aws_s3_bucket.pipeline_data.arn}/athena-results/*"]
+      }
+    ]
+  })
+}
+
+resource "aws_iam_instance_profile" "metabase" {
+  name = "MetabaseInstanceProfile"
+  role = aws_iam_role.metabase_instance.name
+
+  tags = local.common_tags
 }
