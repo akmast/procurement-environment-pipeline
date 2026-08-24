@@ -27,13 +27,6 @@ env:
   # Secrets and variables → Actions → Secrets (not Variables) →
   # BUDGET_NOTIFICATION_EMAIL before the first deploy — see docs/aws/deployment.md.
   TF_VAR_budget_notification_email: ${{ secrets.BUDGET_NOTIFICATION_EMAIL }}
-  # Same reasoning as above, for metabase.tf's security group — an IP
-  # address identifies you personally, so it's a Secret, not a Variable.
-  # Value must be a Terraform-readable list literal, e.g.
-  # ["203.0.113.4/32"] — set under Settings → Secrets and variables →
-  # Actions → Secrets → METABASE_ALLOWED_CIDR_BLOCKS before the first
-  # deploy — see docs/aws/deployment.md.
-  TF_VAR_metabase_allowed_cidr_blocks: ${{ secrets.METABASE_ALLOWED_CIDR_BLOCKS }}
 
 jobs:
   deploy:
@@ -41,6 +34,34 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # Same reasoning as BUDGET_NOTIFICATION_EMAIL above, for
+      # metabase.tf's security group — an IP address identifies you
+      # personally, so it's a Secret, not a Variable. Deliberately NOT
+      # read directly into TF_VAR_metabase_allowed_cidr_blocks the way
+      # BUDGET_NOTIFICATION_EMAIL is: that Terraform variable is a
+      # list(string), and Terraform parses a TF_VAR_ value as an HCL/JSON
+      # literal, so a human typing the required ["203.0.113.4/32"]
+      # syntax directly into a GitHub secret box is one missing quote
+      # away from Terraform trying to read the IP as a number and
+      # dividing it ("Invalid number literal"). METABASE_ALLOWED_CIDR_BLOCKS
+      # is instead just a plain comma-separated list of CIDR blocks (e.g.
+      # 203.0.113.4/32 or 203.0.113.4/32,198.51.100.9/32) — set under
+      # Settings → Secrets and variables → Actions → Secrets before the
+      # first deploy (see docs/aws/deployment.md) — and this step builds
+      # the real Terraform list literal from it.
+      - name: Build metabase_allowed_cidr_blocks Terraform variable
+        env:
+          RAW_CIDRS: ${{ secrets.METABASE_ALLOWED_CIDR_BLOCKS }}
+        run: |
+          if [ -z "${RAW_CIDRS}" ]; then
+            echo "::error::METABASE_ALLOWED_CIDR_BLOCKS secret is not set. Add it under Settings -> Secrets and variables -> Actions -> Secrets — a plain comma-separated list of CIDR blocks, e.g. 203.0.113.4/32"
+            exit 1
+          fi
+          CIDR_JSON=$(echo "${RAW_CIDRS}" | tr ',' '\n' \
+            | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' \
+            | jq -R . | jq -s -c .)
+          echo "TF_VAR_metabase_allowed_cidr_blocks=${CIDR_JSON}" >> "$GITHUB_ENV"
 
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
