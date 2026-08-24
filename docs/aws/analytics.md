@@ -63,9 +63,15 @@ setup needed:
   the `<project>-gold` workgroup, and `procurement_gold` database —
   whatever runs the tool needs AWS credentials with (at minimum)
   Athena query permissions plus read access to the Glue Catalog and
-  the Gold S3 prefix; see `MetabaseInstanceRole`'s former policy in
-  this file's git history (`iam.tf`) for exactly which permissions
-  that requires, if standing up a similar role again.
+  the Gold S3 prefix.
+- **Local Metabase in Docker** (`local/metabase/`): the maintained,
+  ready-to-run option for this — a `docker-compose.yml` running
+  Metabase against this exact Athena workgroup/Glue database, reading
+  AWS credentials from your local AWS CLI/SSO profile (never static
+  keys), plus a minimal IAM policy document (`iam-policy.json`) scoped
+  to exactly the permissions above. See `local/metabase/README.md` for
+  setup, the Athena connection walkthrough, and the full command
+  reference.
 
 ## Cost
 
