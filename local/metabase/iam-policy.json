@@ -1,0 +1,58 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "RunAthenaQueries",
+      "Effect": "Allow",
+      "Action": [
+        "athena:StartQueryExecution",
+        "athena:GetQueryExecution",
+        "athena:GetQueryResults",
+        "athena:StopQueryExecution",
+        "athena:GetWorkGroup",
+        "athena:ListQueryExecutions"
+      ],
+      "Resource": "arn:aws:athena:eu-central-1:137307166874:workgroup/procurement-environment-pipeline-gold"
+    },
+    {
+      "Sid": "ReadGlueCatalog",
+      "Effect": "Allow",
+      "Action": [
+        "glue:GetDatabase",
+        "glue:GetDatabases",
+        "glue:GetTable",
+        "glue:GetTables",
+        "glue:GetPartition",
+        "glue:GetPartitions"
+      ],
+      "Resource": [
+        "arn:aws:glue:eu-central-1:137307166874:catalog",
+        "arn:aws:glue:eu-central-1:137307166874:database/procurement_gold",
+        "arn:aws:glue:eu-central-1:137307166874:table/procurement_gold/*"
+      ]
+    },
+    {
+      "Sid": "ReadGoldData",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::procurement-pipeline-137307166874-eu-central-1/data/gold/*"
+    },
+    {
+      "Sid": "ListDataBucketForAthena",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::procurement-pipeline-137307166874-eu-central-1",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": ["data/gold/*", "athena-results/*"]
+        }
+      }
+    },
+    {
+      "Sid": "ReadWriteAthenaResults",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject"],
+      "Resource": "arn:aws:s3:::procurement-pipeline-137307166874-eu-central-1/athena-results/*"
+    }
+  ]
+}

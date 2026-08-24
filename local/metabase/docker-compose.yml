@@ -1,0 +1,42 @@
+# Local Metabase for querying the Gold Layer through the existing AWS
+# Athena workgroup / Glue Data Catalog (see
+# infrastructure/terraform/athena.tf, glue.tf) — no cloud infrastructure
+# for Metabase itself. This replaces the earlier EC2-hosted instance
+# (removed — see docs/aws/analytics.md for why) with a plain local
+# container; the Gold data it queries never leaves S3.
+#
+# AWS credentials are never baked into this file or the image: the
+# container reads your existing local AWS CLI/SSO profile (mounted
+# read-only) via the standard AWS credentials provider chain, selected
+# by AWS_PROFILE below. Nothing here creates, stores, or transmits
+# access keys — see README.md for the exact IAM permissions that
+# profile needs and how to grant them.
+services:
+  metabase:
+    image: metabase/metabase:v0.63.14.2
+    container_name: procurement-pipeline-metabase-local
+    ports:
+      - "3000:3000"
+    environment:
+      MB_DB_FILE: /metabase-data/metabase.db
+      AWS_REGION: ${AWS_REGION:-eu-central-1}
+      AWS_PROFILE: ${AWS_PROFILE:?Set AWS_PROFILE in .env (copy .env.example) to your local AWS CLI/SSO profile name}
+    volumes:
+      # Metabase's own app state (users, saved questions, dashboards,
+      # visualization settings) — see README.md for exactly what
+      # survives which commands.
+      - metabase-data:/metabase-data
+      # Read-only: same profile/SSO cache your `aws` CLI already uses on
+      # this machine. Override AWS_CONFIG_HOME in .env if your AWS
+      # config directory isn't the default ~/.aws.
+      - ${AWS_CONFIG_HOME:-${HOME}/.aws}:/root/.aws:ro
+    restart: unless-stopped
+
+volumes:
+  # Named (not bind-mounted) so it survives `docker compose stop`/
+  # `start`, a Docker daemon/host restart, and `docker compose up`
+  # recreating the container — as long as the volume itself isn't
+  # explicitly removed (`docker compose down -v`, see README.md).
+  # Nothing here needs a .gitignore entry: this lives in Docker's own
+  # volume storage, never inside the repository tree.
+  metabase-data:
