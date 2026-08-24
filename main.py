@@ -83,7 +83,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 from common.bootstrap import check_bootstrap_complete, write_bootstrap_manifest
 from common.logging_config import setup_logging
 from common.manifest import StageResult, STATUS_FAILED
-from common.storage import read_text, write_text
+from common.storage import exists, read_text, write_text
 
 import ingestion.eea.nuts_boundaries as eea_nuts_boundaries_ingest
 import ingestion.eea.stations as eea_stations_ingest
@@ -102,6 +102,10 @@ import transformation.eea.stations as eea_stations_transform
 import transformation.eea.measurements as eea_measurements_transform
 import transformation.ted.notices as ted_notices_transform
 
+import gold.eea.measurements as eea_measurements_gold
+import gold.ted.notices as ted_notices_gold
+import gold.eurostat.agriculture_accounts as eurostat_agriculture_accounts_gold
+
 logger = logging.getLogger(__name__)
 
 VALID_SOURCES = [
@@ -109,7 +113,13 @@ VALID_SOURCES = [
     "ted-codelists", "ted-notices",
     "eurostat-agriculture-accounts",
 ]
-VALID_STAGES = ["ingestion", "normalization", "transformation"]
+VALID_STAGES = ["ingestion", "normalization", "transformation", "gold"]
+
+# Sources with a Gold Layer build (see gold/<source>/*.py) — all three
+# main-data families, never the reference-data sources (eea-nuts-boundaries,
+# ted-codelists, eea-stations combine into other sources' Gold tables, not
+# their own — see docs/pipelines/gold_layer.md).
+GOLD_SOURCES = ["eea-measurements", "ted-notices", "eurostat-agriculture-accounts"]
 
 # pipeline historical/update operate on source *families* (matching the
 # Step Functions external input shape, e.g. {"sources": ["eea", "ted"]})
@@ -249,6 +259,26 @@ def run_stage(*, source, stage, mode, storage_mode, countries, paths, discover,
         resolved = _resolve_paths_or_countries(paths, countries, discover,
                                                 eurostat_agriculture_accounts_norm.discover_countries, storage_mode)
         return eurostat_agriculture_accounts_norm.run(storage_mode=storage_mode, countries=resolved)
+
+    # Gold Layer — combines every country/year of the precursor stage's
+    # output into one Parquet file (see gold/<source>/*.py's own
+    # docstrings for exactly which precursor stage each reads and why).
+    # Always used with --discover in practice (Step Functions' Gold
+    # Standard state machine, see infrastructure/terraform/templates/
+    # gold_standard.asl.json.tpl) since Gold's whole point is combining
+    # everything currently available, not a specific changed subset.
+    if key == ("eea-measurements", "gold"):
+        resolved = _resolve_paths_or_countries(paths, countries, discover,
+                                                eea_measurements_gold.discover_countries, storage_mode)
+        return eea_measurements_gold.run(storage_mode=storage_mode, countries=resolved)
+    if key == ("ted-notices", "gold"):
+        resolved = _resolve_paths_or_countries(paths, countries, discover,
+                                                ted_notices_gold.discover_countries, storage_mode)
+        return ted_notices_gold.run(storage_mode=storage_mode, countries=resolved)
+    if key == ("eurostat-agriculture-accounts", "gold"):
+        resolved = _resolve_paths_or_countries(paths, countries, discover,
+                                                eurostat_agriculture_accounts_gold.discover_countries, storage_mode)
+        return eurostat_agriculture_accounts_gold.run(storage_mode=storage_mode, countries=resolved)
 
     raise ValueError(
         f"Unsupported (source, stage) combination: source={source!r} stage={stage!r} — "
@@ -443,6 +473,36 @@ def cmd_check_bootstrap_complete(args) -> int:
     return 0
 
 
+def cmd_check_manifest_has_output(args) -> int:
+    """
+    Reads one stage's own manifest (runs/<run_id>/<source>/<stage>.json,
+    written by _execute_stage above) and exits 0 only if it actually
+    wrote/changed something (non-empty written_paths) — exits non-zero
+    for a manifest with none (nothing new this run — a genuinely
+    unremarkable outcome, e.g. a refresh that found nothing changed
+    upstream, not an error) or a missing manifest.
+
+    Exists so Step Functions can gate a downstream Gold Layer rebuild on
+    "did this source's data actually change this run" via a normal ECS
+    RunTask state (same execution model, and the same reasoning, as
+    check-bootstrap-complete above) — historical/update route this
+    command's failure through a Catch straight to that source's
+    Succeeded state (skipping Gold), the same "non-zero exit as a
+    boolean branch, not just an error" pattern check-bootstrap-complete
+    already uses for BootstrapIncomplete.
+    """
+    manifest_path = f"runs/{args.run_id}/{args.source}/{args.stage_name}.json"
+    if not exists(manifest_path, args.storage_mode):
+        raise FileNotFoundError(f"No manifest at {manifest_path}")
+
+    manifest = json.loads(read_text(manifest_path, args.storage_mode))
+    written = manifest.get("written_paths") or []
+    logger.info("Manifest output check | path=%s written_paths=%s", manifest_path, len(written))
+    if not written:
+        raise RuntimeError(f"No written_paths in {manifest_path} — nothing changed this run")
+    return 0
+
+
 # --------------------------------------------------------------------------
 # argparse
 # --------------------------------------------------------------------------
@@ -512,6 +572,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     check_bootstrap_parser.add_argument("--storage-mode", choices=["local", "cloud"], default="local")
 
+    check_manifest_parser = subparsers.add_parser(
+        "check-manifest-has-output",
+        help="Verify one (run_id, source, stage) manifest has non-empty written_paths — exits non-zero "
+             "otherwise. Used by Step Functions to gate a downstream Gold Layer rebuild on whether this "
+             "run actually changed that source's data.",
+    )
+    check_manifest_parser.add_argument("--run-id", required=True)
+    check_manifest_parser.add_argument("--source", required=True, choices=VALID_SOURCES)
+    check_manifest_parser.add_argument("--stage", required=True, choices=VALID_STAGES, dest="stage_name")
+    check_manifest_parser.add_argument("--storage-mode", choices=["local", "cloud"], default="local")
+
     return parser
 
 
@@ -531,6 +602,8 @@ def main(argv=None) -> int:
             return cmd_write_bootstrap_manifest(args)
         elif args.command == "check-bootstrap-complete":
             return cmd_check_bootstrap_complete(args)
+        elif args.command == "check-manifest-has-output":
+            return cmd_check_manifest_has_output(args)
         else:
             raise ValueError(f"Unknown command {args.command!r}")
     except Exception:

@@ -143,6 +143,23 @@ moving to the next:
    Terraform and redeploy — `aws scheduler update-schedule` above is
    the direct-CLI alternative if you don't want to touch Terraform.)
 
+5. **Nothing extra needed for Gold** — steps 2 and 3 already rebuild
+   each requested source's Gold table automatically right after its
+   last data stage, as long as that run actually changed something
+   (see `docs/pipelines/gold_layer.md`). Check
+   `data/gold/<source>/*.parquet` in the bucket after either run to
+   confirm.
+
+   **Optional — a manual, unconditional full Gold rebuild** (all three
+   sources, regardless of whether anything changed recently — useful
+   e.g. right after fixing a Gold-layer bug, without re-running
+   historical/update just to get there):
+   ```
+   aws stepfunctions start-execution \
+     --state-machine-arn <gold_standard_state_machine_arn output> \
+     --input '{}'
+   ```
+
 ## Terraform state
 
 - Backend: S3, bucket `procurement-pipeline-tfstate-137307166874`,
