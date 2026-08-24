@@ -95,16 +95,53 @@ python main.py stage --source eea-measurements --stage gold --discover --storage
 python main.py stage --source ted-notices --stage gold --discover --storage-mode cloud
 ```
 
-**In AWS — `GoldStandardStateMachine`** (see
-`infrastructure/terraform/templates/gold_standard.asl.json.tpl`):
-manual only, never on a schedule, and **not** automatically chained
-after `HistoricalStateMachine`/`UpdateStateMachine` — it's a
-deliberate, separate rebuild step you run once the sources you care
-about have actually been ingested/normalized/transformed. It always
-rebuilds all three sources in parallel (one ECS task per source, each
-running the `main.py stage ... --discover` command above), each
-independent of the others, so one source failing doesn't stop the
-rest.
+**In AWS — automatically, inside `HistoricalStateMachine`/`UpdateStateMachine`.**
+Each of the three source branches (see `docs/aws/architecture.md`'s
+dependency graph) runs its own Gold build itself, right after its last
+data stage — `EeaRunTransformation`/`TedRunTransformation` for EEA/TED,
+`EurostatRunNormalization` for Eurostat (no transformation stage there,
+so Gold reads straight from normalization, per the table above) — but
+**only if that stage actually wrote something new this run**:
+
+```
+... last data stage ...
+        │
+        ▼
+CheckHasNewData  (main.py check-manifest-has-output --run-id ... --source ... --stage ...)
+        │
+   ┌────┴────┐
+ nothing    wrote
+  new      something
+   │           │
+   ▼           ▼
+ skip      RunGold  (main.py stage --source ... --stage gold --discover ...)
+   │           │
+   └─────┬─────┘
+         ▼
+     <source>Succeeded
+```
+
+`check-manifest-has-output` reads that stage's own manifest
+(`runs/<run_id>/<source>/<stage>.json`) and exits non-zero if
+`written_paths` is empty — a genuinely unremarkable outcome (e.g. a
+refresh that found nothing changed upstream), not an error. The ASL
+`Catch`es that non-zero exit straight to the branch's `Succeeded`
+state, skipping the Gold rebuild entirely — so no new (identical)
+Gold file gets written for no reason, and no wasted ECS task runs. A
+real Gold build failure, on the other hand, still fails the branch
+(and the overall historical/update run) the same as any other stage.
+
+This means Gold always reflects the latest transformed/normalized data
+after any historical or update run that changed something — nothing
+extra to run yourself.
+
+**In AWS — manually, via `GoldStandardStateMachine`** (see
+`infrastructure/terraform/templates/gold_standard.asl.json.tpl`): a
+separate, supplementary state machine for an **unconditional** full
+rebuild of all three sources, regardless of whether anything changed
+recently — useful e.g. right after fixing a bug in the Gold build
+logic itself, without needing to re-run historical/update just to
+trigger a rebuild. Manual only, never on a schedule.
 
 Start it via **Actions → Run Pipeline → Run workflow**, `state_machine: gold-standard`
 (`sources`/`countries`/`from_year`/`to_year`/`run_id`/`start_stage` are

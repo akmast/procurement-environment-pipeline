@@ -60,8 +60,11 @@ flowchart TB
         EU_ING["Eurostat agri accounts<br/>ingestion"] --> EU_NORM["Eurostat agri accounts<br/>normalization"]
     end
 
-    subgraph Gold["Gold Standard (manual, separate — not auto-chained)"]
+    subgraph Gold["Gold (inside each branch, conditional)"]
         direction TB
+        EEA_CHECK{"changed this run?"}
+        TED_CHECK{"changed this run?"}
+        EU_CHECK{"changed this run?"}
         EEA_GOLD["EEA measurements<br/>gold"]
         TED_GOLD["TED notices<br/>gold"]
         EU_GOLD["Eurostat agri accounts<br/>gold"]
@@ -70,9 +73,9 @@ flowchart TB
     MANIFEST -.gates.-> Main
     ST_TRANS -.stations for join.-> EEA_TRANS
     TC_NORM -.codelist labels, soft dep.-> TED_TRANS
-    EEA_TRANS --> EEA_GOLD
-    TED_TRANS --> TED_GOLD
-    EU_NORM --> EU_GOLD
+    EEA_TRANS --> EEA_CHECK -->|yes| EEA_GOLD
+    TED_TRANS --> TED_CHECK -->|yes| TED_GOLD
+    EU_NORM --> EU_CHECK -->|yes| EU_GOLD
 ```
 
 Key points this reflects from the actual code (see
@@ -96,10 +99,16 @@ Key points this reflects from the actual code (see
 - **Gold Layer** (`gold/<source>/*.py`, `docs/pipelines/gold_layer.md`)
   reads each source's already-normalized/transformed output and
   combines every country/year into one Parquet file with a fixed,
-  renamed column set. `GoldStandardStateMachine` is its own state
-  machine — manual only, never scheduled, and **not** automatically
-  triggered by Historical/Update finishing; it's a deliberate separate
-  rebuild step, run whenever the sources you care about are up to date.
+  renamed column set. Each of historical/update's three branches runs
+  its own source's Gold build automatically right after its last data
+  stage (transformation for EEA/TED, normalization for Eurostat) —
+  **but only if that stage actually wrote something new this run**
+  (`main.py check-manifest-has-output` gates it); if nothing changed,
+  Gold is skipped and the branch still reports SUCCEEDED. A separate
+  `GoldStandardStateMachine` also exists for a manual, on-demand full
+  rebuild of all three sources regardless of whether anything changed
+  recently — useful after fixing a Gold-layer bug, without re-running
+  historical/update just to get there.
 
 ## Inter-stage data flow — manifests, not dataset content
 
