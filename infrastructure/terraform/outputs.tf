@@ -84,11 +84,6 @@ output "athena_database_name" {
 }
 
 output "athena_workgroup_name" {
-  description = "Athena workgroup name — use this when connecting Metabase's Athena driver (see docs/aws/analytics.md)."
+  description = "Athena workgroup name — use this when connecting a BI tool's Athena driver (see docs/aws/analytics.md)."
   value       = aws_athena_workgroup.gold.name
-}
-
-output "metabase_url" {
-  description = "Metabase web UI URL — only reachable from metabase_allowed_cidr_blocks."
-  value       = "http://${aws_eip.metabase.public_ip}:3000"
 }

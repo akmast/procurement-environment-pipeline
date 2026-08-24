@@ -13,13 +13,8 @@
 # --- Required, no default ---
 budget_notification_email = "you@example.com"
 
-# Metabase's web UI is only reachable from these CIDR blocks (see
-# metabase.tf) — use your own public IP in /32 form, e.g.
-# metabase_allowed_cidr_blocks = ["203.0.113.4/32"]
-metabase_allowed_cidr_blocks = ["203.0.113.4/32"]
-
 # --- AWS Budgets — cost monitoring only, never disables resources ---
-budget_limit_amount = 35
+budget_limit_amount = 20
 budget_currency     = "USD"
 
 # --- Everything else below matches variables.tf's defaults; override only if needed ---
@@ -42,6 +37,3 @@ budget_currency     = "USD"
 # update_schedule_timezone       = "Europe/Berlin"
 # update_schedule_enabled        = false
 # athena_database_name           = "procurement_gold"
-# metabase_instance_type         = "t3.micro"
-# metabase_volume_size_gb        = 30
-# metabase_image_tag             = "v0.63.14.2"

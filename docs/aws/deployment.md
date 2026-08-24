@@ -21,32 +21,6 @@
   **Secrets**. **`terraform plan`/`apply` fails without this set** —
   the corresponding Terraform variable, `budget_notification_email`,
   has no default on purpose.
-- GitHub repository **Secret** `METABASE_ALLOWED_CIDR_BLOCKS` — the
-  CIDR block(s) allowed to reach Metabase's web UI on port 3000 (see
-  `metabase.tf` and `docs/aws/analytics.md`'s "Access model"). Same
-  reasoning as `BUDGET_NOTIFICATION_EMAIL`: an IP address identifies
-  you personally, so it's a Secret, not a Variable. **Value is a plain,
-  comma-separated list of CIDR blocks — no brackets, no quotes**, e.g.:
-  ```
-  203.0.113.4/32
-  ```
-  or, for more than one:
-  ```
-  203.0.113.4/32,198.51.100.9/32
-  ```
-  `deploy.yml`'s own "Build metabase_allowed_cidr_blocks Terraform
-  variable" step converts this into the actual Terraform list literal
-  before `plan`/`apply` runs — **do not** type the Terraform syntax
-  (`["203.0.113.4/32"]`) into the secret yourself: Terraform parses a
-  `TF_VAR_` value as HCL/JSON, so an unquoted IP inside brackets gets
-  read as division and fails with `Invalid number literal` (the
-  bracket/quote syntax is exactly the kind of thing that's easy to get
-  wrong typing into a plain text box — that's why this step exists).
-  Set it under Settings → Secrets and variables → Actions → **Secrets**,
-  and update it (then re-run the deploy) whenever your IP changes.
-  **`terraform plan`/`apply` fails without this set** —
-  `metabase_allowed_cidr_blocks` has no default on purpose, so a real
-  IP never ends up hardcoded in the repo.
 
 No AWS Access Keys exist anywhere in this setup — `deploy.yml` and
 `run-pipeline.yml` both authenticate via
