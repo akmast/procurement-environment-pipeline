@@ -113,7 +113,7 @@ Rough monthly add-on beyond the existing pipeline spend, `eu-central-1`:
 | Item | Approx. cost |
 |---|---|
 | EC2 `t3.micro` (default `metabase_instance_type`) | ~$8-9/month |
-| EBS gp3, default 20GB (`metabase_volume_size_gb`) | ~$2/month |
+| EBS gp3, default 30GB (`metabase_volume_size_gb`) | ~$3/month |
 | Elastic IP (attached to a running instance) | $0 — only unattached EIPs are charged |
 | Glue Data Catalog (3 tables) | Free tier covers this easily |
 | Athena queries | $5/TB scanned — negligible at this data volume |
