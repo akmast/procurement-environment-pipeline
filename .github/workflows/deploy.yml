@@ -94,6 +94,24 @@ jobs:
           echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
           echo "image_uri=${IMAGE_URI}" >> "$GITHUB_OUTPUT"
 
+      # GitHubDeployRole's own IAM policy must land before the full apply
+      # below, whenever that full apply also deletes IAM resources this
+      # role only has permission to delete via a just-added policy
+      # statement (see iam.tf's CleanUpRemovedMetabaseIam/Ec2 statements,
+      # added alongside the Metabase teardown they exist to permit) — a
+      # single combined apply doesn't guarantee the policy update lands
+      # before the delete call that depends on it, since nothing in the
+      # dependency graph forces that order once the deleted resources no
+      # longer reference each other. Targeting this resource alone first
+      # removes that race: by the time the full apply runs, the runtime
+      # credentials Terraform is already using are AWS's live evaluation
+      # of the (now updated) policy either way — but only this two-step
+      # sequencing guarantees the update is visible before anything tries
+      # to rely on it.
+      - name: Apply GitHubDeployRole policy first (avoids an IAM permission race)
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform apply -input=false -auto-approve -target=aws_iam_role_policy.github_deploy
+
       # Registers a new ECS task definition revision referencing the
       # image just pushed (ECS task definitions are immutable per
       # revision, so this is inherently safe/reproducible — nothing is
