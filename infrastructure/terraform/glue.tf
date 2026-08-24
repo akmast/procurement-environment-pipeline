@@ -16,7 +16,7 @@
 # (Int64) EEA vocabulary codes, not strings.
 resource "aws_glue_catalog_database" "gold" {
   name        = var.athena_database_name
-  description = "Gold Layer tables (EEA, TED, Eurostat) for Athena/Metabase analytics."
+  description = "Gold Layer tables (EEA, TED, Eurostat) for Athena SQL/BI analytics."
 }
 
 resource "aws_glue_catalog_table" "eea_measurements" {
