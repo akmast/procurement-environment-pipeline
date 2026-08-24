@@ -102,6 +102,10 @@ import transformation.eea.stations as eea_stations_transform
 import transformation.eea.measurements as eea_measurements_transform
 import transformation.ted.notices as ted_notices_transform
 
+import gold.eea.measurements as eea_measurements_gold
+import gold.ted.notices as ted_notices_gold
+import gold.eurostat.agriculture_accounts as eurostat_agriculture_accounts_gold
+
 logger = logging.getLogger(__name__)
 
 VALID_SOURCES = [
@@ -109,7 +113,13 @@ VALID_SOURCES = [
     "ted-codelists", "ted-notices",
     "eurostat-agriculture-accounts",
 ]
-VALID_STAGES = ["ingestion", "normalization", "transformation"]
+VALID_STAGES = ["ingestion", "normalization", "transformation", "gold"]
+
+# Sources with a Gold Layer build (see gold/<source>/*.py) — all three
+# main-data families, never the reference-data sources (eea-nuts-boundaries,
+# ted-codelists, eea-stations combine into other sources' Gold tables, not
+# their own — see docs/pipelines/gold_layer.md).
+GOLD_SOURCES = ["eea-measurements", "ted-notices", "eurostat-agriculture-accounts"]
 
 # pipeline historical/update operate on source *families* (matching the
 # Step Functions external input shape, e.g. {"sources": ["eea", "ted"]})
@@ -249,6 +259,26 @@ def run_stage(*, source, stage, mode, storage_mode, countries, paths, discover,
         resolved = _resolve_paths_or_countries(paths, countries, discover,
                                                 eurostat_agriculture_accounts_norm.discover_countries, storage_mode)
         return eurostat_agriculture_accounts_norm.run(storage_mode=storage_mode, countries=resolved)
+
+    # Gold Layer — combines every country/year of the precursor stage's
+    # output into one Parquet file (see gold/<source>/*.py's own
+    # docstrings for exactly which precursor stage each reads and why).
+    # Always used with --discover in practice (Step Functions' Gold
+    # Standard state machine, see infrastructure/terraform/templates/
+    # gold_standard.asl.json.tpl) since Gold's whole point is combining
+    # everything currently available, not a specific changed subset.
+    if key == ("eea-measurements", "gold"):
+        resolved = _resolve_paths_or_countries(paths, countries, discover,
+                                                eea_measurements_gold.discover_countries, storage_mode)
+        return eea_measurements_gold.run(storage_mode=storage_mode, countries=resolved)
+    if key == ("ted-notices", "gold"):
+        resolved = _resolve_paths_or_countries(paths, countries, discover,
+                                                ted_notices_gold.discover_countries, storage_mode)
+        return ted_notices_gold.run(storage_mode=storage_mode, countries=resolved)
+    if key == ("eurostat-agriculture-accounts", "gold"):
+        resolved = _resolve_paths_or_countries(paths, countries, discover,
+                                                eurostat_agriculture_accounts_gold.discover_countries, storage_mode)
+        return eurostat_agriculture_accounts_gold.run(storage_mode=storage_mode, countries=resolved)
 
     raise ValueError(
         f"Unsupported (source, stage) combination: source={source!r} stage={stage!r} — "

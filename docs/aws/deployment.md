@@ -143,6 +143,18 @@ moving to the next:
    Terraform and redeploy — `aws scheduler update-schedule` above is
    the direct-CLI alternative if you don't want to touch Terraform.)
 
+5. **Optional — a Gold Layer build**, once step 2 or 3 has actually
+   written some normalized/transformed data to combine:
+   ```
+   aws stepfunctions start-execution \
+     --state-machine-arn <gold_standard_state_machine_arn output> \
+     --input '{}'
+   ```
+   `GoldStandardStateMachine` always rebuilds all three sources from
+   everything currently available — see `docs/pipelines/gold_layer.md`.
+   It's manual only and never auto-chained after historical/update, so
+   re-run it yourself whenever you want the Gold tables refreshed.
+
 ## Terraform state
 
 - Backend: S3, bucket `procurement-pipeline-tfstate-137307166874`,

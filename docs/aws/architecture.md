@@ -60,9 +60,19 @@ flowchart TB
         EU_ING["Eurostat agri accounts<br/>ingestion"] --> EU_NORM["Eurostat agri accounts<br/>normalization"]
     end
 
+    subgraph Gold["Gold Standard (manual, separate — not auto-chained)"]
+        direction TB
+        EEA_GOLD["EEA measurements<br/>gold"]
+        TED_GOLD["TED notices<br/>gold"]
+        EU_GOLD["Eurostat agri accounts<br/>gold"]
+    end
+
     MANIFEST -.gates.-> Main
     ST_TRANS -.stations for join.-> EEA_TRANS
     TC_NORM -.codelist labels, soft dep.-> TED_TRANS
+    EEA_TRANS --> EEA_GOLD
+    TED_TRANS --> TED_GOLD
+    EU_NORM --> EU_GOLD
 ```
 
 Key points this reflects from the actual code (see
@@ -83,6 +93,13 @@ Key points this reflects from the actual code (see
   EEA stations — those are bootstrap-only, on purpose (they change
   rarely; re-fetching them on every run would be wasteful and race
   against transformation runs already in flight).
+- **Gold Layer** (`gold/<source>/*.py`, `docs/pipelines/gold_layer.md`)
+  reads each source's already-normalized/transformed output and
+  combines every country/year into one Parquet file with a fixed,
+  renamed column set. `GoldStandardStateMachine` is its own state
+  machine — manual only, never scheduled, and **not** automatically
+  triggered by Historical/Update finishing; it's a deliberate separate
+  rebuild step, run whenever the sources you care about are up to date.
 
 ## Inter-stage data flow — manifests, not dataset content
 

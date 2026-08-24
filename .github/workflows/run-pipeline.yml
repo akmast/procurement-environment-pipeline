@@ -15,8 +15,9 @@ on:
           - update
           - historical
           - bootstrap-reference
+          - gold-standard
       sources:
-        description: "Space-separated source families (eea ted eurostat) — ignored for bootstrap-reference"
+        description: "Space-separated source families (eea ted eurostat) — ignored for bootstrap-reference and gold-standard (Gold always rebuilds all three from everything currently available)"
         required: false
         default: "eea ted eurostat"
       countries:
@@ -67,6 +68,7 @@ jobs:
             update) NAME="UpdateStateMachine" ;;
             historical) NAME="HistoricalStateMachine" ;;
             bootstrap-reference) NAME="BootstrapReferenceStateMachine" ;;
+            gold-standard) NAME="GoldStandardStateMachine" ;;
             *) echo "Unknown state_machine input: ${STATE_MACHINE}" >&2; exit 1 ;;
           esac
           ARN=$(aws stepfunctions list-state-machines \
@@ -105,6 +107,11 @@ jobs:
                   print("run_id/start_stage are not supported for bootstrap-reference", file=sys.stderr)
                   sys.exit(1)
               payload = {"countries_csv": countries_csv}
+          elif state_machine == "gold-standard":
+              if run_id or start_stage:
+                  print("run_id/start_stage are not supported for gold-standard", file=sys.stderr)
+                  sys.exit(1)
+              payload = {}  # no fields — always discovers and combines everything available
           elif state_machine == "update":
               payload = {"sources": sources, "countries_csv": countries_csv}
           elif state_machine == "historical":

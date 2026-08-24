@@ -13,6 +13,7 @@ downloads real data from real APIs.
 | `bootstrap-reference` | ignored | Run once initially, and again whenever reference data needs updating (rare — see `architecture.md`) |
 | `historical` | `eea ted eurostat` (space-separated) | Requires `from_year`/`to_year`; manual only, never scheduled |
 | `update` | `eea ted eurostat` | What the monthly schedule runs |
+| `gold-standard` | ignored | Rebuilds the Gold Layer — always all three sources, always from everything currently normalized/transformed (see `docs/pipelines/gold_layer.md`); manual only, never scheduled, never auto-chained after `update`/`historical`. Run it as a deliberate step once the sources you care about are up to date. |
 
 ## Viewing a Step Functions execution
 

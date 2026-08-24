@@ -33,6 +33,11 @@ output "update_state_machine_arn" {
   value       = aws_sfn_state_machine.update.arn
 }
 
+output "gold_standard_state_machine_arn" {
+  description = "GoldStandardStateMachine ARN — manual only, rebuilds the Gold Layer (see docs/pipelines/gold_layer.md)."
+  value       = aws_sfn_state_machine.gold_standard.arn
+}
+
 output "monthly_update_schedule_name" {
   description = "EventBridge Scheduler schedule name — check its state (DISABLED/ENABLED) before assuming it's live."
   value       = aws_scheduler_schedule.monthly_update.name
