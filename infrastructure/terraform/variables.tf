@@ -113,9 +113,9 @@ variable "update_schedule_enabled" {
 }
 
 variable "budget_limit_amount" {
-  description = "Monthly AWS Budgets cost limit for this project's tagged resources (see budget.tf). Notification-only — never triggers any automatic resource shutdown or restriction."
+  description = "Monthly AWS Budgets cost limit for this project's tagged resources (see budget.tf). Notification-only — never triggers any automatic resource shutdown or restriction. Raised from the original 20 once the Metabase/Athena/Glue analytics stack (metabase.tf, athena.tf, glue.tf) was added — a t3.micro instance plus its EBS volume alone runs roughly $10-12/month on top of the existing pipeline spend."
   type        = number
-  default     = 20
+  default     = 35
 }
 
 variable "budget_currency" {
@@ -128,4 +128,40 @@ variable "budget_notification_email" {
   description = "Email address that receives budget threshold notifications (see budget.tf's 80%/100% notification blocks). Required, no default — never hardcode an email in Terraform source. Supplied via TF_VAR_budget_notification_email in deploy.yml, sourced from the BUDGET_NOTIFICATION_EMAIL GitHub repo variable; for a local/manual apply, export TF_VAR_budget_notification_email or pass -var."
   type        = string
   sensitive   = true
+}
+
+# --------------------------------------------------------------------------
+# Analytics stack (glue.tf, athena.tf, metabase.tf) — Athena/Glue query the
+# Gold Layer directly, Metabase is the only always-on, publicly-reachable
+# resource this project runs (see docs/aws/architecture.md and
+# docs/aws/analytics.md).
+# --------------------------------------------------------------------------
+
+variable "athena_database_name" {
+  description = "Glue Catalog database name holding the three Gold Layer tables (eea_measurements, ted_notices, eurostat_agriculture_accounts)."
+  type        = string
+  default     = "procurement_gold"
+}
+
+variable "metabase_allowed_cidr_blocks" {
+  description = "CIDR blocks allowed to reach Metabase's web UI (port 3000) on metabase.tf's security group. Required, no default — Metabase must never be left reachable from 0.0.0.0/0. Use your own public IP in /32 form (e.g. [\"203.0.113.4/32\"]); update this and re-apply whenever that IP changes."
+  type        = list(string)
+}
+
+variable "metabase_instance_type" {
+  description = "EC2 instance type Metabase runs on. t3.micro is the smallest size Metabase reliably runs on (needs at least ~1GB RAM)."
+  type        = string
+  default     = "t3.micro"
+}
+
+variable "metabase_volume_size_gb" {
+  description = "Root EBS volume size (GiB) for the Metabase instance — holds the Docker image plus Metabase's own embedded H2 application database (dashboards, saved questions, users). Not backed by RDS; see docs/aws/analytics.md for the durability trade-off."
+  type        = number
+  default     = 20
+}
+
+variable "metabase_image_tag" {
+  description = "metabase/metabase Docker image tag to run. Pinned to a specific release (not \"latest\") for reproducible deploys — bump deliberately, not automatically."
+  type        = string
+  default     = "v0.63.14.2"
 }
