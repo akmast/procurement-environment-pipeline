@@ -15,6 +15,18 @@ data/gold/eea/measurements.parquet.
 Dropped relative to the transformed table: `aggregation_type` (not
 needed for Gold-level analysis).
 
+Every output column is cast to a fixed dtype (GOLD_DTYPES) right before
+write — never left to what pandas/pyarrow infer from concatenating
+partition files, which can silently drift (e.g. `pollutant_code` is an
+EEA vocabulary code, kept as a string; earlier code cast it numeric,
+which combined with one drifted partition file to produce inconsistent
+types in the real Gold file — Athena then failed reading it against the
+Glue table's `bigint` definition with `HIVE_BAD_DATA`). Rows missing
+any of REQUIRED_COLUMNS are dropped (see drop_missing_required) —
+`validity_code` is required because an unvalidated measurement isn't
+meaningful for analysis; `verification_code` is not (see
+docs/pipelines/gold_layer.md).
+
 `countries` must be passed explicitly, same "explicit partitions only"
 convention as every other stage in this project — pass
 discover_countries(storage_mode) to combine every country currently
@@ -40,7 +52,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from common.gold import build_gold_table, write_gold_table
+from common.gold import build_gold_table, drop_missing_required, enforce_dtypes, write_gold_table
 from common.manifest import StageResult
 from common.storage import list_files, resolve_paths
 from transformation.eea.measurements import TRANSFORMED_BASE_DIR
@@ -74,6 +86,40 @@ RENAME = {
     "nuts3_code": "nuts3",
 }
 
+# Enforced right before write (see common.gold.enforce_dtypes) — matches
+# infrastructure/terraform/glue.tf's eea_measurements table column-for-
+# column. pollutant_code/validity_code/verification_code are EEA
+# vocabulary codes, kept/dropped as strings/nullable ints respectively,
+# never guessed from what a partition file happens to contain.
+GOLD_DTYPES = {
+    "country_code": "string",
+    "sampling_point_id": "string",
+    "pollutant_code": "string",
+    "measurement_period_start": "datetime64[ns]",
+    "measurement_period_end": "datetime64[ns]",
+    "measurement_value": "float64",
+    "measurement_unit": "string",
+    "validity_code": "Int64",
+    "verification_code": "Int64",
+    "result_timestamp": "datetime64[ns]",
+    "station_location": "string",
+    "nuts1": "string",
+    "nuts2": "string",
+    "nuts3": "string",
+}
+
+# A measurement missing any of these isn't meaningful for analysis — see
+# common.gold.drop_missing_required. verification_code is deliberately
+# NOT required: an unverified-but-validated measurement is still usable.
+REQUIRED_COLUMNS = [
+    "country_code",
+    "pollutant_code",
+    "measurement_period_start",
+    "measurement_value",
+    "measurement_unit",
+    "validity_code",
+]
+
 
 def discover_countries(storage_mode: str) -> list[str]:
     """Country codes come from the transformed layer's own <country>/ subdirectories."""
@@ -98,6 +144,8 @@ def run(storage_mode: str = "local", countries: list[str] | None = None) -> Stag
         return StageResult().finalize(attempted=0)
 
     df = build_gold_table(paths, storage_mode, SOURCE_COLUMNS, rename=RENAME)
+    df = enforce_dtypes(df, GOLD_DTYPES)
+    df = drop_missing_required(df, REQUIRED_COLUMNS)
 
     out_path = f"{GOLD_BASE_DIR}/{GOLD_FILENAME}"
     write_gold_table(df, out_path, storage_mode)

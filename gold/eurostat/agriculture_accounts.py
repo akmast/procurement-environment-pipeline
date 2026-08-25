@@ -17,6 +17,14 @@ docs/pipelines/eurostat_agriculture_accounts.md — `unit_label` alone is
 enough) and `time_label` (a string echo of `time`, e.g. "2021" for
 2021 — the typed `time` column already covers it).
 
+Every output column is cast to a fixed dtype (GOLD_DTYPES) right before
+write — never left to what pandas/pyarrow infer from concatenating
+partition files (see gold/eea/measurements.py's docstring for why that
+matters). A row missing any column is meaningless here (there's no
+"count-only" use case the way TED has) — REQUIRED_COLUMNS is every
+column except frequency_code/frequency_label, see
+common.gold.drop_missing_required.
+
 `countries` must be passed explicitly, same "explicit partitions only"
 convention as every other stage in this project — pass
 discover_countries(storage_mode) to combine every country currently
@@ -42,7 +50,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from common.gold import build_gold_table, write_gold_table
+from common.gold import build_gold_table, drop_missing_required, enforce_dtypes, write_gold_table
 from common.manifest import StageResult
 from common.storage import list_files, resolve_paths
 from normalization.eurostat.agriculture_accounts import NORMALIZED_BASE_DIR
@@ -72,6 +80,40 @@ RENAME = {
     "value": "indicator_value",
 }
 
+# Enforced right before write (see common.gold.enforce_dtypes) — matches
+# infrastructure/terraform/glue.tf's eurostat_agriculture_accounts table
+# column-for-column. Every code/label/NUTS field is a categorical
+# identifier, kept as a string even where it looks numeric.
+GOLD_DTYPES = {
+    "country_code": "string",
+    "frequency_code": "string",
+    "frequency_label": "string",
+    "agricultural_item_code": "string",
+    "agricultural_item_label": "string",
+    "agricultural_indicator_code": "string",
+    "agricultural_indicator_label": "string",
+    "unit_label": "string",
+    "nuts2": "string",
+    "nuts2_label": "string",
+    "reference_year": "Int64",
+    "indicator_value": "float64",
+}
+
+# Every column except frequency_code/frequency_label — see module
+# docstring and common.gold.drop_missing_required.
+REQUIRED_COLUMNS = [
+    "country_code",
+    "agricultural_item_code",
+    "agricultural_item_label",
+    "agricultural_indicator_code",
+    "agricultural_indicator_label",
+    "unit_label",
+    "nuts2",
+    "nuts2_label",
+    "reference_year",
+    "indicator_value",
+]
+
 
 def discover_countries(storage_mode: str) -> list[str]:
     """Country codes come from the normalized layer's own <country>/ subdirectories."""
@@ -97,6 +139,8 @@ def run(storage_mode: str = "local", countries: list[str] | None = None) -> Stag
         return StageResult().finalize(attempted=0)
 
     df = build_gold_table(paths, storage_mode, SOURCE_COLUMNS, rename=RENAME)
+    df = enforce_dtypes(df, GOLD_DTYPES)
+    df = drop_missing_required(df, REQUIRED_COLUMNS)
 
     out_path = f"{GOLD_BASE_DIR}/{GOLD_FILENAME}"
     write_gold_table(df, out_path, storage_mode)

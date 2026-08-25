@@ -20,6 +20,19 @@ deliberately left out of this table — not needed for Gold-level
 analysis, and none of them collide with drop_duplicates() (lists are
 unhashable, so keeping them would break exact-row deduplication).
 
+Every output column is cast to a fixed dtype (GOLD_DTYPES) right before
+write — never left to what pandas/pyarrow infer from concatenating
+partition files (see gold/eea/measurements.py's docstring for why that
+matters). Rows missing an identifying field (REQUIRED_COLUMNS) are
+dropped — but NOT rows missing `contract_total_value`/
+`contract_currency_code`: a notice with an unknown value is still a
+real notice for count-based metrics (`COUNT(DISTINCT
+notice_publication_number)`), just not usable for value aggregation.
+Any query that sums/averages `contract_total_value` must filter
+`WHERE contract_total_value IS NOT NULL AND contract_currency_code IS
+NOT NULL` itself — Gold Layer does not do that filtering, since it
+would silently make the table wrong for the count use case.
+
 `countries` must be passed explicitly, same "explicit partitions only"
 convention as every other stage in this project — pass
 discover_countries(storage_mode) to combine every country currently
@@ -45,7 +58,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from common.gold import build_gold_table, write_gold_table
+from common.gold import build_gold_table, drop_missing_required, enforce_dtypes, write_gold_table
 from common.manifest import StageResult
 from common.storage import list_files, resolve_paths
 from transformation.ted.notices import NOTICES_FILENAME, TRANSFORMED_BASE_DIR
@@ -71,6 +84,35 @@ RENAME = {
     "nuts_label": "place_of_performance_nuts_label",
 }
 
+# Enforced right before write (see common.gold.enforce_dtypes) — matches
+# infrastructure/terraform/glue.tf's ted_notices table column-for-column.
+# The two date fields are calendar dates only (no time component),
+# matching normalization/ted/notices.py's own parse_ted_date.
+GOLD_DTYPES = {
+    "country_code": "string",
+    "notice_publication_number": "string",
+    "notice_publication_date": "date",
+    "contract_conclusion_date": "date",
+    "buyer_name": "string",
+    "contract_total_value": "float64",
+    "contract_currency_code": "string",
+    "place_of_performance_nuts": "string",
+    "nuts1": "string",
+    "nuts2": "string",
+    "nuts3": "string",
+    "place_of_performance_nuts_label": "string",
+    "nuts1_label": "string",
+}
+
+# Only the fields that identify a notice — see common.gold.
+# drop_missing_required and the module docstring for why
+# contract_total_value/contract_currency_code are deliberately excluded.
+REQUIRED_COLUMNS = [
+    "country_code",
+    "notice_publication_number",
+    "notice_publication_date",
+]
+
 
 def discover_countries(storage_mode: str) -> list[str]:
     """Country codes come from the transformed layer's own <country>/ subdirectories."""
@@ -95,6 +137,8 @@ def run(storage_mode: str = "local", countries: list[str] | None = None) -> Stag
         return StageResult().finalize(attempted=0)
 
     df = build_gold_table(paths, storage_mode, SOURCE_COLUMNS, rename=RENAME)
+    df = enforce_dtypes(df, GOLD_DTYPES)
+    df = drop_missing_required(df, REQUIRED_COLUMNS)
 
     out_path = f"{GOLD_BASE_DIR}/{GOLD_FILENAME}"
     write_gold_table(df, out_path, storage_mode)

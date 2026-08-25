@@ -55,3 +55,42 @@ def test_combines_countries_selects_renames_and_writes_one_file(tmp_path, monkey
     assert "value" not in df.columns  # renamed to measurement_value
     assert sorted(df["nuts2"]) == ["DE30", "PL22"]
     assert len(df) == 2  # both countries combined into one file
+
+
+def test_pollutant_code_is_a_string_even_when_source_stores_it_numeric(tmp_path, monkeypatch):
+    # pollutant_code is an EEA vocabulary code, never an arithmetic
+    # value — the source partition file storing it as a plain int
+    # (as older transformed data does) must not leak through as a Glue
+    # `bigint`-incompatible type; enforce_dtypes() always casts it to
+    # a real string.
+    row = _transformed_row("DE", "SPO.DE_DEBE034_PM1_dataGroup2", 10.5, "DE3", "DE30", "DE300")
+    row["pollutant"] = 5  # numeric, like the legacy Int64-cast data
+    _write(tmp_path, monkeypatch,
+           "data/transformed/eea/measurements/DE/2021/PM10/measurements.parquet",
+           pd.DataFrame([row]))
+
+    result = run(storage_mode="local", countries=["DE"])
+
+    df = pd.read_parquet(tmp_path / result.written_paths[0])
+    assert df["pollutant_code"].dtype == "string"
+    assert df["pollutant_code"].iloc[0] == "5"
+
+
+def test_drops_rows_missing_a_required_field_but_keeps_missing_verification(tmp_path, monkeypatch):
+    complete = _transformed_row("DE", "SPO.DE_DEBE034_PM1_dataGroup2", 10.5, "DE3", "DE30", "DE300")
+    missing_validity = _transformed_row("DE", "SPO.DE_DEBE035_PM1_dataGroup2", 11.0, "DE3", "DE30", "DE300")
+    missing_validity["validity"] = None
+    missing_verification = _transformed_row("DE", "SPO.DE_DEBE036_PM1_dataGroup2", 12.0, "DE3", "DE30", "DE300")
+    missing_verification["verification"] = None
+
+    _write(tmp_path, monkeypatch,
+           "data/transformed/eea/measurements/DE/2021/PM10/measurements.parquet",
+           pd.DataFrame([complete, missing_validity, missing_verification]))
+
+    result = run(storage_mode="local", countries=["DE"])
+
+    df = pd.read_parquet(tmp_path / result.written_paths[0])
+    # missing_validity dropped (validity_code is required); missing_verification kept
+    assert sorted(df["sampling_point_id"]) == [
+        "SPO.DE_DEBE034_PM1_dataGroup2", "SPO.DE_DEBE036_PM1_dataGroup2",
+    ]

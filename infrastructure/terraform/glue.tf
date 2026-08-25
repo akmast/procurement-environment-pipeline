@@ -8,12 +8,19 @@
 # doesn't need. If a Gold column set ever changes, update the matching
 # table below in the same change.
 #
-# Column types were taken from the actual pandas/pyarrow dtypes each
-# Gold build produces (normalization's astype/to_datetime calls,
-# transformation's TED date parsing — see gold/*/*.py and
-# normalization/*/*.py), not guessed from column names. Notably:
-# EEA's pollutant_code/validity_code/verification_code are numeric
-# (Int64) EEA vocabulary codes, not strings.
+# Column types match each source's GOLD_DTYPES dict exactly (see
+# gold/*/*.py — that's what enforce_dtypes() actually casts every
+# column to right before write, not just what normalization happens to
+# produce upstream). Notably: EEA's pollutant_code is a categorical EEA
+# vocabulary code, kept as `string` even though it looks numeric — an
+# earlier version of this table declared it `bigint`, which drifted out
+# of sync with the real Parquet data (a `large_string`/BINARY column,
+# from a partition file that predated deterministic dtype enforcement)
+# and made Athena fail every query against this table with
+# `HIVE_BAD_DATA: Field pollutant_code's type BINARY ... is
+# incompatible with type bigint`. validity_code/verification_code are
+# genuinely numeric (a validity/verification flag, not an identifier)
+# and stay `bigint`.
 resource "aws_glue_catalog_database" "gold" {
   name        = var.athena_database_name
   description = "Gold Layer tables (EEA, TED, Eurostat) for Athena SQL/BI analytics."
@@ -48,7 +55,7 @@ resource "aws_glue_catalog_table" "eea_measurements" {
     }
     columns {
       name = "pollutant_code"
-      type = "bigint"
+      type = "string"
     }
     columns {
       name = "measurement_period_start"
