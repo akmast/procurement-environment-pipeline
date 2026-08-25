@@ -22,24 +22,30 @@ services:
       AWS_REGION: ${AWS_REGION:-eu-central-1}
       AWS_PROFILE: ${AWS_PROFILE:?Set AWS_PROFILE in .env (copy .env.example) to your local AWS CLI/SSO profile name}
       # Explicit, not left to the AWS SDK's default "$HOME/.aws/..."
-      # lookup: the JVM's notion of the process's home directory doesn't
-      # reliably match the /root/.aws mount below across all Metabase
-      # image variants, which surfaced as the SDK reporting the profile
-      # file as completely empty (ProfileFile(sections=[])) even though
-      # the file was confirmed present and correct via `docker compose
-      # exec ... cat /root/.aws/credentials`. Pointing directly at the
-      # mounted files sidesteps that HOME/user.home ambiguity entirely.
-      AWS_SHARED_CREDENTIALS_FILE: /root/.aws/credentials
-      AWS_CONFIG_FILE: /root/.aws/config
+      # lookup. Must point into /home/metabase, not /root: the Metabase
+      # image's main Java process runs as the unprivileged `metabase`
+      # user (UID 2000), which can't traverse /root at all (mode 700) —
+      # so pointing here at /root/.aws previously failed with the SDK
+      # reporting the profile file as completely empty
+      # (ProfileFile(sections=[])), even though the file was genuinely
+      # present and correctly mounted. That was only invisible in
+      # `docker compose exec` diagnostics because exec defaults to root,
+      # which can read anything — always add `--user metabase` when
+      # verifying file access this way, or the check is misleading.
+      AWS_SHARED_CREDENTIALS_FILE: /home/metabase/.aws/credentials
+      AWS_CONFIG_FILE: /home/metabase/.aws/config
     volumes:
       # Metabase's own app state (users, saved questions, dashboards,
       # visualization settings) — see README.md for exactly what
       # survives which commands.
       - metabase-data:/metabase-data
       # Read-only: same profile/SSO cache your `aws` CLI already uses on
-      # this machine. Override AWS_CONFIG_HOME in .env if your AWS
-      # config directory isn't the default ~/.aws.
-      - ${AWS_CONFIG_HOME:-${HOME}/.aws}:/root/.aws:ro
+      # this machine. Mounted into /home/metabase (the `metabase` user's
+      # own home, not /root — see the AWS_SHARED_CREDENTIALS_FILE note
+      # above) so the Java process can actually read it. Override
+      # AWS_CONFIG_HOME in .env if your AWS config directory isn't the
+      # default ~/.aws.
+      - ${AWS_CONFIG_HOME:-${HOME}/.aws}:/home/metabase/.aws:ro
     restart: unless-stopped
 
 volumes:
