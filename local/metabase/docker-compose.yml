@@ -21,6 +21,16 @@ services:
       MB_DB_FILE: /metabase-data/metabase.db
       AWS_REGION: ${AWS_REGION:-eu-central-1}
       AWS_PROFILE: ${AWS_PROFILE:?Set AWS_PROFILE in .env (copy .env.example) to your local AWS CLI/SSO profile name}
+      # Explicit, not left to the AWS SDK's default "$HOME/.aws/..."
+      # lookup: the JVM's notion of the process's home directory doesn't
+      # reliably match the /root/.aws mount below across all Metabase
+      # image variants, which surfaced as the SDK reporting the profile
+      # file as completely empty (ProfileFile(sections=[])) even though
+      # the file was confirmed present and correct via `docker compose
+      # exec ... cat /root/.aws/credentials`. Pointing directly at the
+      # mounted files sidesteps that HOME/user.home ambiguity entirely.
+      AWS_SHARED_CREDENTIALS_FILE: /root/.aws/credentials
+      AWS_CONFIG_FILE: /root/.aws/config
     volumes:
       # Metabase's own app state (users, saved questions, dashboards,
       # visualization settings) — see README.md for exactly what
