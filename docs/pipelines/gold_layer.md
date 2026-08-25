@@ -99,12 +99,72 @@ below). Renames are defined in each module's own `RENAME` dict.
 4. Drop exact duplicate rows (`DataFrame.drop_duplicates()` —
    deterministic: `resolve_paths`/`list_files` return sorted paths, so
    the first occurrence kept is always the same one).
-5. Write one file: `data/gold/<source>/<name>.parquet`
+5. Cast every column to its declared dtype (`common.gold.enforce_dtypes`,
+   each module's own `GOLD_DTYPES`) — never left to what pandas/pyarrow
+   happen to infer from concatenating partition files, which can drift
+   per-file (see "Dtypes are enforced, not inferred" below).
+6. Drop rows missing a required field (`common.gold.drop_missing_required`,
+   each module's own `REQUIRED_COLUMNS` — see "Null-guard rules" below).
+7. Write one file: `data/gold/<source>/<name>.parquet`
    (`agriculture_accounts.parquet`, `measurements.parquet`,
    `notices.parquet`).
 
 Reads/writes go through `common.storage`, so `storage_mode="local"`/
 `"cloud"` run identically.
+
+## Dtypes are enforced, not inferred
+
+A Gold build concatenates every partition file it finds — if one of
+them drifted in dtype (a stale file written by an older code version,
+a partition that happens to be all-null in one column), pandas'
+concatenation can silently widen the *whole* combined column to
+whatever type covers the mix (typically `object`). That's exactly what
+happened in production: `eea_measurements.pollutant_code` was cast to
+`Int64` by normalization, but the real Gold Parquet file had it as
+`large_string` — one drifted partition was enough — while
+`infrastructure/terraform/glue.tf` still declared it `bigint`, so every
+Athena query against the table failed with `HIVE_BAD_DATA: Field
+pollutant_code's type BINARY ... is incompatible with type bigint`.
+
+Each `gold/<source>/*.py` module now declares a `GOLD_DTYPES` dict
+(column -> dtype kind) applied via `common.gold.enforce_dtypes()` right
+after `build_gold_table()`, so the written Parquet file's schema is
+always exactly what's declared, regardless of what any individual
+partition file contained. **Every code/label/identifier column is
+`string`, even ones that look numeric** — `pollutant_code` included —
+since these are categorical values (EEA vocabulary codes, NUTS codes,
+...), not arithmetic ones, and can have leading zeros or non-digit
+characters. `infrastructure/terraform/glue.tf`'s three tables are kept
+in sync column-for-column with each module's `GOLD_DTYPES` — **update
+both in the same change** if a Gold column's type ever needs to
+change.
+
+## Null-guard rules
+
+Each module also declares `REQUIRED_COLUMNS`, applied via
+`common.gold.drop_missing_required()` right after `enforce_dtypes()`:
+a row missing any of them is dropped from the Gold file entirely. An
+empty or whitespace-only string in a required string column is treated
+as missing too, not just an actual `NULL`/`NaN`.
+
+- **EEA**: `country_code`, `pollutant_code`, `measurement_period_start`,
+  `measurement_value`, `measurement_unit`, `validity_code` are required
+  — an unvalidated measurement isn't meaningful for analysis.
+  `verification_code` is deliberately **not** required: an unverified-
+  but-validated measurement is still usable.
+- **TED**: only `country_code`, `notice_publication_number`,
+  `notice_publication_date` are required — the fields that identify a
+  notice. `contract_total_value`/`contract_currency_code` are
+  deliberately **not** required: a notice with an unknown value still
+  counts for `COUNT(DISTINCT notice_publication_number)`-style metrics,
+  just not for value aggregation. Any query that sums/averages
+  `contract_total_value` must filter `WHERE contract_total_value IS NOT
+  NULL AND contract_currency_code IS NOT NULL` itself — Gold Layer does
+  not do that filtering, since it would silently break the count use
+  case.
+- **Eurostat**: every column is required except `frequency_code`/
+  `frequency_label` — a row missing any other field isn't usable for
+  analysis and there's no Eurostat equivalent of TED's count-only case.
 
 ## Running it
 

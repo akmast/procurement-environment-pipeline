@@ -53,3 +53,19 @@ def test_combines_countries_selects_renames_and_writes_one_file(tmp_path, monkey
     assert "value" not in df.columns  # renamed to indicator_value
     assert sorted(df["nuts2"]) == ["DE11", "PL22"]
     assert len(df) == 2  # both countries combined into one file
+
+
+def test_drops_rows_missing_any_required_field(tmp_path, monkeypatch):
+    complete = _normalized_row("DE", 2021, "DE11", 273.94)
+    missing_value = _normalized_row("DE", 2021, "DE12", None)  # indicator_value missing
+    missing_label = _normalized_row("DE", 2021, "DE13", 50.0)
+    missing_label["geo_label"] = "   "  # blank-only, must be treated as missing
+
+    _write(tmp_path, monkeypatch,
+           "data/normalized/eurostat/regional_agricultural_accounts/DE/2021/aact_eaa01_r.parquet",
+           pd.DataFrame([complete, missing_value, missing_label]))
+
+    result = run(storage_mode="local", countries=["DE"])
+
+    df = pd.read_parquet(tmp_path / result.written_paths[0])
+    assert sorted(df["nuts2"]) == ["DE11"]
