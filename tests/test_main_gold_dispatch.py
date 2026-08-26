@@ -1,7 +1,8 @@
 """Unit tests for main.py's Gold Layer CLI wiring — run_stage() dispatch
-for stage="gold", which is what Step Functions' GoldStandardStateMachine
-actually invokes per source (see infrastructure/terraform/templates/
-gold_standard.asl.json.tpl)."""
+for stage="gold", which is what HistoricalStateMachine/UpdateStateMachine
+invoke per source right after that source's last data stage (see
+infrastructure/terraform/templates/historical.asl.json.tpl,
+update.asl.json.tpl)."""
 import pytest
 
 import main

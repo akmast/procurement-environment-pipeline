@@ -81,28 +81,3 @@ resource "aws_sfn_state_machine" "update" {
 
   tags = local.common_tags
 }
-
-# GoldStandardStateMachine — manual only, never on a schedule and never
-# auto-chained after Historical/Update. Rebuilds the Gold Layer (see
-# gold/<source>/*.py, docs/pipelines/gold_layer.md): one combined
-# Parquet per source, always from every country/year currently available
-# in that source's normalized/transformed output. Run it as a deliberate
-# separate step after the sources you care about have been processed.
-resource "aws_sfn_state_machine" "gold_standard" {
-  name     = "GoldStandardStateMachine"
-  role_arn = aws_iam_role.step_functions.arn
-  type     = "STANDARD"
-
-  definition = templatefile(
-    "${path.module}/templates/gold_standard.asl.json.tpl",
-    local.asl_template_vars
-  )
-
-  logging_configuration {
-    log_destination        = "${aws_cloudwatch_log_group.step_functions.arn}:*"
-    include_execution_data = true
-    level                  = "ALL"
-  }
-
-  tags = local.common_tags
-}

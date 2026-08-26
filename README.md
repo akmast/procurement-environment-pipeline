@@ -148,7 +148,6 @@ The pipeline runs in public VPC subnets with outbound-only Security Group rules 
 | `BootstrapReferenceStateMachine` | Prepare NUTS boundaries, TED codelists and EEA stations | Manual |
 | `HistoricalStateMachine` | Load a selected historical period | Manual |
 | `UpdateStateMachine` | Run source-specific incremental updates | Manual or EventBridge |
-| `GoldStandardStateMachine` | Rebuild all Gold tables without rerunning upstream stages | Manual |
 
 All workflows use the same ECS cluster, reusable task definition, and Docker image. Each state launches a temporary Fargate task with a different `main.py` command.
 
