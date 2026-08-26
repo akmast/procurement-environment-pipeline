@@ -1,11 +1,13 @@
-"""End-to-end test for gold/eea/measurements.py: multiple transformed
-country/year/pollutant Parquet files -> one combined Gold file with the
-requested columns, order, and nuts*_code -> nuts* renames."""
+"""End-to-end test for gold/eea/measurements.py: one transformed
+country/year/pollutant Parquet file -> one Gold partition file with the
+requested columns, order, and nuts*_code -> nuts* renames — never one
+combined file for the whole source."""
 from io import BytesIO
 
 import pandas as pd
 
-from gold.eea.measurements import GOLD_BASE_DIR, GOLD_FILENAME, run
+from common.storage import exists
+from gold.eea.measurements import GOLD_BASE_DIR, _LEGACY_GOLD_PATH, run
 
 
 def _write(tmp_path, monkeypatch, relative_path, df):
@@ -27,7 +29,7 @@ def _transformed_row(country, sampling_point, value, nuts1, nuts2, nuts3):
     }
 
 
-def test_combines_countries_selects_renames_and_writes_one_file(tmp_path, monkeypatch):
+def test_writes_one_gold_file_per_country_partition_not_one_combined_file(tmp_path, monkeypatch):
     _write(tmp_path, monkeypatch,
            "data/transformed/eea/measurements/DE/2021/PM10/measurements.parquet",
            pd.DataFrame([_transformed_row(
@@ -40,21 +42,47 @@ def test_combines_countries_selects_renames_and_writes_one_file(tmp_path, monkey
     result = run(storage_mode="local", countries=["DE", "PL"])
 
     assert result.status != "FAILED"
-    assert result.written_paths == [f"{GOLD_BASE_DIR}/{GOLD_FILENAME}"]
+    assert sorted(result.written_paths) == [
+        f"{GOLD_BASE_DIR}/measurements_DE_2021_PM10.parquet",
+        f"{GOLD_BASE_DIR}/measurements_PL_2021_PM10.parquet",
+    ]
 
-    df = pd.read_parquet(tmp_path / result.written_paths[0])
-    assert list(df.columns) == [
+    de = pd.read_parquet(tmp_path / f"{GOLD_BASE_DIR}/measurements_DE_2021_PM10.parquet")
+    pl = pd.read_parquet(tmp_path / f"{GOLD_BASE_DIR}/measurements_PL_2021_PM10.parquet")
+    assert list(de.columns) == [
         "country_code", "sampling_point_id", "pollutant_code",
         "measurement_period_start", "measurement_period_end",
         "measurement_value", "measurement_unit", "validity_code", "verification_code",
         "result_timestamp", "station_location", "nuts1", "nuts2", "nuts3",
     ]
-    assert "aggregation_type" not in df.columns
-    assert "nuts1_code" not in df.columns  # renamed to nuts1
-    assert "sampling_point" not in df.columns  # renamed to sampling_point_id
-    assert "value" not in df.columns  # renamed to measurement_value
-    assert sorted(df["nuts2"]) == ["DE30", "PL22"]
-    assert len(df) == 2  # both countries combined into one file
+    assert "aggregation_type" not in de.columns
+    assert "nuts1_code" not in de.columns  # renamed to nuts1
+    assert "sampling_point" not in de.columns  # renamed to sampling_point_id
+    assert "value" not in de.columns  # renamed to measurement_value
+    assert len(de) == 1 and len(pl) == 1
+    assert de["nuts2"].iloc[0] == "DE30"
+    assert pl["nuts2"].iloc[0] == "PL22"
+
+
+def test_rerunning_a_partition_overwrites_in_place_not_accumulates(tmp_path, monkeypatch):
+    # Same partition (DE/2021/PM10) reprocessed with different content —
+    # simulates an update run that revised this partition's transformed
+    # data. The Gold file at that exact partition path must reflect only
+    # the latest content, never both old and new rows — this is what
+    # keeps a later run from ever double-counting an already-Gold'd row.
+    path = "data/transformed/eea/measurements/DE/2021/PM10/measurements.parquet"
+    _write(tmp_path, monkeypatch, path,
+           pd.DataFrame([_transformed_row("DE", "SPO.OLD", 10.5, "DE3", "DE30", "DE300")]))
+    run(storage_mode="local", countries=["DE"])
+
+    _write(tmp_path, monkeypatch, path,
+           pd.DataFrame([_transformed_row("DE", "SPO.NEW", 11.0, "DE3", "DE30", "DE300")]))
+    result = run(storage_mode="local", countries=["DE"])
+
+    out_path = f"{GOLD_BASE_DIR}/measurements_DE_2021_PM10.parquet"
+    assert result.written_paths == [out_path]
+    df = pd.read_parquet(tmp_path / out_path)
+    assert list(df["sampling_point_id"]) == ["SPO.NEW"]
 
 
 def test_pollutant_code_is_a_string_even_when_source_stores_it_numeric(tmp_path, monkeypatch):
@@ -94,3 +122,20 @@ def test_drops_rows_missing_a_required_field_but_keeps_missing_verification(tmp_
     assert sorted(df["sampling_point_id"]) == [
         "SPO.DE_DEBE034_PM1_dataGroup2", "SPO.DE_DEBE036_PM1_dataGroup2",
     ]
+
+
+def test_cleanup_legacy_file_only_when_requested(tmp_path, monkeypatch):
+    monkeypatch.setattr("common.storage.PROJECT_ROOT", tmp_path)
+    legacy_full_path = tmp_path / _LEGACY_GOLD_PATH
+    legacy_full_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_full_path.write_bytes(b"old combined gold file")
+
+    _write(tmp_path, monkeypatch,
+           "data/transformed/eea/measurements/DE/2021/PM10/measurements.parquet",
+           pd.DataFrame([_transformed_row("DE", "SPO.A", 10.5, "DE3", "DE30", "DE300")]))
+
+    run(storage_mode="local", countries=["DE"], cleanup_legacy_file=False)
+    assert exists(_LEGACY_GOLD_PATH, "local")  # untouched on an ordinary incremental run
+
+    run(storage_mode="local", countries=["DE"], cleanup_legacy_file=True)
+    assert not exists(_LEGACY_GOLD_PATH, "local")  # removed on a --discover full rebuild

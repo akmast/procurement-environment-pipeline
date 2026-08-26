@@ -1,23 +1,28 @@
 """
 Shared helpers for Gold Layer modules (gold/<source>/*.py) — the final,
-analysis-ready layer: one Parquet file per source, every country/year
-combined, only the columns that matter for analysis kept and named.
+analysis-ready layer: one Parquet file per *precursor partition*, only
+the columns that matter for analysis kept and named.
 
-The things genuinely common across eurostat/eea/ted's own Gold builders:
-"read every partition file found, keep+order+rename these columns, drop
-exact duplicate rows, write one combined file" (build_gold_table/
-write_gold_table), plus, since a build concatenates many partition
-files that can individually drift in dtype (a stale file written by an
-older code version, a partition that's all-null in one column, ...),
-"cast these columns to these exact dtypes" and "drop rows missing any
-of these required columns" (enforce_dtypes/drop_missing_required) —
-never left to whatever pandas/pyarrow happens to infer from the
-concatenation. Which precursor stage to read, which base directory, and
-which columns/renames/dtypes/required-fields stay in each source's own
-gold/<source>/*.py module, matching this project's "source-specific
-logic stays in the source module" rule.
+Gold mirrors the same partitioning its precursor stage (normalization
+or transformation) already uses, one output file per input file — not
+one giant combined file for the whole source. This is what makes a
+Gold build incremental: a run only reads+rewrites the specific
+partition(s) its precursor actually touched this run (via
+--input-manifest, exactly like normalization/transformation already
+do), leaving every other partition's Gold file untouched. There's
+deliberately no "combine many precursor files into one Gold table"
+step here — each precursor partition file already fully represents its
+own partition, so building+writing one Gold partition is a single-file
+operation (build_gold_partition/gold_partition_path/write_gold_table),
+plus, since dtypes must never depend on what pandas/pyarrow happen to
+infer, "cast these columns to these exact dtypes" and "drop rows
+missing any of these required columns" (enforce_dtypes/
+drop_missing_required). Which precursor stage to read, which base
+directory, and which columns/renames/dtypes/required-fields stay in
+each source's own gold/<source>/*.py module, matching this project's
+"source-specific logic stays in the source module" rule.
 
-    from common.gold import build_gold_table, enforce_dtypes, drop_missing_required, write_gold_table
+    from common.gold import build_gold_partition, gold_partition_path, enforce_dtypes, drop_missing_required, write_gold_table
 """
 import logging
 from io import BytesIO
@@ -29,61 +34,65 @@ from common.storage import read_bytes, write_bytes
 logger = logging.getLogger(__name__)
 
 
-def build_gold_table(
-    paths: list[str],
+def build_gold_partition(
+    path: str,
     storage_mode: str,
     columns: list[str],
     rename: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     """
-    Reads every Parquet file in `paths`, concatenates them, keeps only
-    `columns` in that exact order (a file missing one of them is logged
-    and contributes NaN for it rather than failing the whole build —
-    schemas upstream can evolve), applies `rename` last so `columns`
-    always names *source* columns, and drops exact duplicate rows
-    (deterministic: pandas keeps the first occurrence, and `paths` comes
-    from common.storage.resolve_paths/list_files, which both return
-    sorted paths).
-
-    This always rebuilds the full table from `paths` — Gold Layer has no
-    partitioning of its own to incrementally merge into.
+    Reads one precursor Parquet file, keeps only `columns` in that exact
+    order (a file missing one of them is logged and contributes NaN for
+    it rather than failing the whole build — schemas upstream can
+    evolve), applies `rename` last so `columns` always names *source*
+    columns, and drops exact duplicate rows within this one file
+    (deterministic — pandas keeps the first occurrence).
     """
-    if not paths:
-        empty_columns = [rename.get(c, c) if rename else c for c in columns]
-        return pd.DataFrame(columns=empty_columns)
-
-    frames = []
-    for path in paths:
-        df = pd.read_parquet(BytesIO(read_bytes(path, storage_mode)))
-        missing = [c for c in columns if c not in df.columns]
-        if missing:
-            logger.warning("Gold source file missing expected column(s) | path=%s missing=%s", path, missing)
-        present = [c for c in columns if c in df.columns]
-        frames.append(df[present])
-
-    combined = pd.concat(frames, ignore_index=True)
-    combined = combined.reindex(columns=columns)
+    df = pd.read_parquet(BytesIO(read_bytes(path, storage_mode)))
+    missing = [c for c in columns if c not in df.columns]
+    if missing:
+        logger.warning("Gold source file missing expected column(s) | path=%s missing=%s", path, missing)
+    present = [c for c in columns if c in df.columns]
+    df = df[present].reindex(columns=columns)
     if rename:
-        combined = combined.rename(columns=rename)
+        df = df.rename(columns=rename)
 
-    before = len(combined)
-    combined = combined.drop_duplicates().reset_index(drop=True)
-    if len(combined) != before:
-        logger.info("Gold table deduplicated | %s -> %s rows", before, len(combined))
+    before = len(df)
+    df = df.drop_duplicates().reset_index(drop=True)
+    if len(df) != before:
+        logger.info("Gold partition deduplicated | path=%s %s -> %s rows", path, before, len(df))
 
-    return combined
+    return df
+
+
+def gold_partition_path(precursor_path: str, precursor_base_dir: str, gold_base_dir: str,
+                         filename_prefix: str) -> str:
+    """
+    Mirrors a precursor file's own partition structure into a flat Gold
+    file name — e.g. `<precursor_base_dir>/DE/2021/PM10/measurements.parquet`
+    (EEA: country/year/pollutant) -> `<gold_base_dir>/measurements_DE_2021_PM10.parquet`,
+    `<precursor_base_dir>/DE/notices.parquet` (TED: country only) ->
+    `<gold_base_dir>/notices_DE.parquet`. Deliberately flat (no
+    subdirectories) under gold_base_dir — Athena/Glue's table `location`
+    is that directory itself, and a flat layout avoids any doubt about
+    whether S3-backed recursive prefix listing is in effect.
+    """
+    relative = precursor_path[len(precursor_base_dir):].lstrip("/")
+    partition_segments = relative.split("/")[:-1]  # drop the file name itself
+    suffix = "_".join(partition_segments)
+    return f"{gold_base_dir}/{filename_prefix}_{suffix}.parquet"
 
 
 def enforce_dtypes(df: pd.DataFrame, dtypes: dict[str, str]) -> pd.DataFrame:
     """
     Casts each named column to its declared dtype, deterministically —
-    a build_gold_table() concatenation can otherwise end up with a
-    column's effective dtype depending on which partition files happened
-    to be involved (e.g. one stale file with a column stored as plain
-    object/string is enough to widen an otherwise-numeric column for the
-    whole combined table). Call this right after build_gold_table(), and
-    before drop_missing_required()/write_gold_table() — required-field
-    detection depends on types already being consistent.
+    a precursor file's own dtype (whatever normalization/transformation
+    happened to produce, or an older code version wrote) is never
+    trusted as-is; Gold's own schema is always the one actually written,
+    every time a partition is rewritten. Call this right after
+    build_gold_partition(), and before drop_missing_required()/
+    write_gold_table() — required-field detection depends on types
+    already being consistent.
 
     Supported dtype kinds (the values in `dtypes`):
       - "string": pandas nullable StringDtype. Use this for every code/

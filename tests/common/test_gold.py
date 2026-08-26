@@ -1,14 +1,16 @@
-"""Unit tests for common/gold.py's build_gold_table()/enforce_dtypes()/
-drop_missing_required()/write_gold_table() — the shared select+order+
-rename+dedup+cast+null-guard+write logic every gold/<source>/*.py
-module relies on."""
+"""Unit tests for common/gold.py's build_gold_partition()/
+gold_partition_path()/enforce_dtypes()/drop_missing_required()/
+write_gold_table() — the shared select+order+rename+dedup+cast+
+null-guard+write-per-partition logic every gold/<source>/*.py module
+relies on."""
 import logging
 from io import BytesIO
 
 import pandas as pd
 import pytest
 
-from common.gold import build_gold_table, drop_missing_required, enforce_dtypes, write_gold_table
+from common.gold import build_gold_partition, drop_missing_required, enforce_dtypes, gold_partition_path, \
+    write_gold_table
 
 
 def _write(tmp_path, monkeypatch, relative_path, df):
@@ -20,46 +22,54 @@ def _write(tmp_path, monkeypatch, relative_path, df):
     full_path.write_bytes(buffer.getvalue())
 
 
-def test_combines_multiple_files_keeps_order_and_renames(tmp_path, monkeypatch):
+def test_build_gold_partition_selects_orders_and_renames(tmp_path, monkeypatch):
     _write(tmp_path, monkeypatch, "a.parquet",
            pd.DataFrame([{"code": "DE", "value": 1.0, "extra": "x"}]))
-    _write(tmp_path, monkeypatch, "b.parquet",
-           pd.DataFrame([{"code": "PL", "value": 2.0, "extra": "y"}]))
 
-    df = build_gold_table(["a.parquet", "b.parquet"], "local", ["code", "value"], rename={"code": "country"})
+    df = build_gold_partition("a.parquet", "local", ["code", "value"], rename={"code": "country"})
 
     assert list(df.columns) == ["country", "value"]
-    assert sorted(df["country"]) == ["DE", "PL"]
+    assert df["country"].iloc[0] == "DE"
     assert "extra" not in df.columns
 
 
-def test_deduplicates_exact_repeat_rows(tmp_path, monkeypatch):
+def test_build_gold_partition_deduplicates_exact_repeat_rows(tmp_path, monkeypatch):
     row = {"code": "DE", "value": 1.0}
-    _write(tmp_path, monkeypatch, "a.parquet", pd.DataFrame([row]))
-    _write(tmp_path, monkeypatch, "b.parquet", pd.DataFrame([row]))  # exact duplicate
+    _write(tmp_path, monkeypatch, "a.parquet", pd.DataFrame([row, row]))  # exact duplicate within one file
 
-    df = build_gold_table(["a.parquet", "b.parquet"], "local", ["code", "value"])
+    df = build_gold_partition("a.parquet", "local", ["code", "value"])
 
     assert len(df) == 1
 
 
-def test_missing_column_logs_and_fills_nan_instead_of_raising(tmp_path, monkeypatch, caplog):
-    _write(tmp_path, monkeypatch, "a.parquet", pd.DataFrame([{"code": "DE", "value": 1.0}]))
-    _write(tmp_path, monkeypatch, "b.parquet", pd.DataFrame([{"code": "PL"}]))  # no "value" column
+def test_build_gold_partition_missing_column_logs_and_fills_nan_instead_of_raising(tmp_path, monkeypatch, caplog):
+    _write(tmp_path, monkeypatch, "a.parquet", pd.DataFrame([{"code": "PL"}]))  # no "value" column
 
     with caplog.at_level(logging.WARNING):
-        df = build_gold_table(["a.parquet", "b.parquet"], "local", ["code", "value"])
+        df = build_gold_partition("a.parquet", "local", ["code", "value"])
 
     assert "missing expected column" in caplog.text
-    by_code = df.set_index("code")
-    assert by_code.loc["DE", "value"] == 1.0
-    assert pd.isna(by_code.loc["PL", "value"])
+    assert pd.isna(df.set_index("code").loc["PL", "value"])
 
 
-def test_empty_paths_returns_empty_dataframe_with_renamed_columns():
-    df = build_gold_table([], "local", ["code", "value"], rename={"code": "country"})
-    assert list(df.columns) == ["country", "value"]
-    assert len(df) == 0
+def test_gold_partition_path_mirrors_precursor_partition_segments():
+    # EEA: country/year/pollutant
+    assert gold_partition_path(
+        "data/transformed/eea/measurements/DE/2021/PM10/measurements.parquet",
+        "data/transformed/eea/measurements", "data/gold/eea", "measurements",
+    ) == "data/gold/eea/measurements_DE_2021_PM10.parquet"
+
+    # TED: country only
+    assert gold_partition_path(
+        "data/transformed/ted/DE/notices.parquet",
+        "data/transformed/ted", "data/gold/ted", "notices",
+    ) == "data/gold/ted/notices_DE.parquet"
+
+    # Eurostat: country/year
+    assert gold_partition_path(
+        "data/normalized/eurostat/regional_agricultural_accounts/DE/2021/aact_eaa01_r.parquet",
+        "data/normalized/eurostat/regional_agricultural_accounts", "data/gold/eurostat", "agriculture_accounts",
+    ) == "data/gold/eurostat/agriculture_accounts_DE_2021.parquet"
 
 
 def test_enforce_dtypes_casts_every_kind():

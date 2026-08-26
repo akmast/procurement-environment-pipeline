@@ -272,7 +272,7 @@
                   "ContainerOverrides": [
                     {
                       "Name": "${container_name}",
-                      "Command.$": "States.Array('stage', '--source', 'eea-measurements', '--stage', 'gold', '--discover', '--storage-mode', 'cloud', '--run-id', $.run_id)"
+                      "Command.$": "States.Array('stage', '--source', 'eea-measurements', '--stage', 'gold', '--storage-mode', 'cloud', '--run-id', $.run_id, '--input-manifest', States.Format('s3://${data_bucket_name}/runs/{}/eea-measurements/transformation.json', $.run_id))"
                     }
                   ]
                 }
@@ -477,7 +477,7 @@
                   "ContainerOverrides": [
                     {
                       "Name": "${container_name}",
-                      "Command.$": "States.Array('stage', '--source', 'ted-notices', '--stage', 'gold', '--discover', '--storage-mode', 'cloud', '--run-id', $.run_id)"
+                      "Command.$": "States.Array('stage', '--source', 'ted-notices', '--stage', 'gold', '--storage-mode', 'cloud', '--run-id', $.run_id, '--input-manifest', States.Format('s3://${data_bucket_name}/runs/{}/ted-notices/transformation.json', $.run_id))"
                     }
                   ]
                 }
@@ -646,7 +646,7 @@
                   "ContainerOverrides": [
                     {
                       "Name": "${container_name}",
-                      "Command.$": "States.Array('stage', '--source', 'eurostat-agriculture-accounts', '--stage', 'gold', '--discover', '--storage-mode', 'cloud', '--run-id', $.run_id)"
+                      "Command.$": "States.Array('stage', '--source', 'eurostat-agriculture-accounts', '--stage', 'gold', '--storage-mode', 'cloud', '--run-id', $.run_id, '--input-manifest', States.Format('s3://${data_bucket_name}/runs/{}/eurostat-agriculture-accounts/normalization.json', $.run_id))"
                     }
                   ]
                 }

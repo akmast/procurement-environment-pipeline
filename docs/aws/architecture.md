@@ -107,17 +107,22 @@ Key points this reflects from the actual code (see
   rarely; re-fetching them on every run would be wasteful and race
   against transformation runs already in flight).
 - **Gold Layer** (`gold/<source>/*.py`, `docs/pipelines/gold_layer.md`)
-  reads each source's already-normalized/transformed output and
-  combines every country/year into one Parquet file with a fixed,
-  renamed column set. Each of historical/update's three branches runs
+  reads each source's already-normalized/transformed output and writes
+  one Parquet file per precursor partition (country/year/pollutant for
+  EEA, country for TED, country/year for Eurostat), each with a fixed,
+  renamed column set — Athena reads every file in a source's Gold
+  folder as one table. Each of historical/update's three branches runs
   its own source's Gold build automatically right after its last data
-  stage (transformation for EEA/TED, normalization for Eurostat) —
-  **but only if that stage actually wrote something new this run**
-  (`main.py check-manifest-has-output` gates it); if nothing changed,
-  Gold is skipped and the branch still reports SUCCEEDED. A separate
-  `GoldStandardStateMachine` also exists for a manual, on-demand full
-  rebuild of all three sources regardless of whether anything changed
-  recently — useful after fixing a Gold-layer bug, without re-running
+  stage (transformation for EEA/TED, normalization for Eurostat),
+  **only for the partition(s) that stage actually touched this run**
+  (via `--input-manifest`, the same mechanism normalization/
+  transformation already use) — **and only if that stage actually
+  wrote something new this run** (`main.py check-manifest-has-output`
+  gates it); if nothing changed, Gold is skipped and the branch still
+  reports SUCCEEDED. A separate `GoldStandardStateMachine` also exists
+  for a manual, on-demand unconditional rebuild of every partition of
+  all three sources regardless of whether anything changed recently —
+  useful after fixing a Gold-layer bug, without re-running
   historical/update just to get there.
 
 ## Inter-stage data flow — manifests, not dataset content
