@@ -221,6 +221,9 @@ __marimo__/
 # Project data
 data/
 
+# Node dependencies (presentation/ build tooling)
+node_modules/
+
 # Logs
 logs/
 *.log
