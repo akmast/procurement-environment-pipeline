@@ -114,11 +114,10 @@ Key points this reflects from the actual code (see
   stage (transformation for EEA/TED, normalization for Eurostat) —
   **but only if that stage actually wrote something new this run**
   (`main.py check-manifest-has-output` gates it); if nothing changed,
-  Gold is skipped and the branch still reports SUCCEEDED. A separate
-  `GoldStandardStateMachine` also exists for a manual, on-demand full
-  rebuild of all three sources regardless of whether anything changed
-  recently — useful after fixing a Gold-layer bug, without re-running
-  historical/update just to get there.
+  Gold is skipped and the branch still reports SUCCEEDED. There is no
+  separate Gold-only state machine — to force a rebuild without new
+  source data (e.g. right after fixing a Gold-layer bug), rerun
+  `historical`/`update` for the sources you care about.
 
 ## Inter-stage data flow — manifests, not dataset content
 

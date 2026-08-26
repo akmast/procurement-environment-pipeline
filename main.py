@@ -263,9 +263,9 @@ def run_stage(*, source, stage, mode, storage_mode, countries, paths, discover,
     # Gold Layer — combines every country/year of the precursor stage's
     # output into one Parquet file (see gold/<source>/*.py's own
     # docstrings for exactly which precursor stage each reads and why).
-    # Always used with --discover in practice (Step Functions' Gold
-    # Standard state machine, see infrastructure/terraform/templates/
-    # gold_standard.asl.json.tpl) since Gold's whole point is combining
+    # Always used with --discover in practice — historical.asl.json.tpl/
+    # update.asl.json.tpl run it automatically, right after that
+    # source's last data stage, since Gold's whole point is combining
     # everything currently available, not a specific changed subset.
     if key == ("eea-measurements", "gold"):
         resolved = _resolve_paths_or_countries(paths, countries, discover,

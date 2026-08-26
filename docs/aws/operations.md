@@ -13,7 +13,6 @@ downloads real data from real APIs.
 | `bootstrap-reference` | ignored | Run once initially, and again whenever reference data needs updating (rare — see `architecture.md`) |
 | `historical` | `eea ted eurostat` (space-separated) | Requires `from_year`/`to_year`; manual only, never scheduled. Rebuilds each requested source's Gold table automatically right after its last data stage, but only if that run actually changed something (see `docs/pipelines/gold_layer.md`) |
 | `update` | `eea ted eurostat` | What the monthly schedule runs. Same automatic, conditional Gold rebuild as `historical` |
-| `gold-standard` | ignored | Manual, on-demand full Gold rebuild — always all three sources, always from everything currently normalized/transformed, regardless of whether anything changed recently. Supplements (doesn't replace) the automatic per-source rebuild `historical`/`update` already do — useful e.g. after fixing a Gold-layer bug, without re-running historical/update just to get there. |
 
 ## Viewing a Step Functions execution
 

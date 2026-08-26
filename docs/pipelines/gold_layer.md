@@ -225,26 +225,11 @@ real Gold build failure, on the other hand, still fails the branch
 
 This means Gold always reflects the latest transformed/normalized data
 after any historical or update run that changed something — nothing
-extra to run yourself.
-
-**In AWS — manually, via `GoldStandardStateMachine`** (see
-`infrastructure/terraform/templates/gold_standard.asl.json.tpl`): a
-separate, supplementary state machine for an **unconditional** full
-rebuild of all three sources, regardless of whether anything changed
-recently — useful e.g. right after fixing a bug in the Gold build
-logic itself, without needing to re-run historical/update just to
-trigger a rebuild. Manual only, never on a schedule.
-
-Start it via **Actions → Run Pipeline → Run workflow**, `state_machine: gold-standard`
-(`sources`/`countries`/`from_year`/`to_year`/`run_id`/`start_stage` are
-all ignored for this one), or directly:
-
-```
-aws stepfunctions start-execution \
-  --state-machine-arn <GoldStandardStateMachine ARN, see `terraform output gold_standard_state_machine_arn`> \
-  --input '{}'
-```
-
-The external input is deliberately empty — `{}` — there is nothing to
-select; every build always discovers and combines everything currently
-available for its source.
+extra to run yourself. There is no separate Gold-only state machine —
+Gold only ever runs as this automatic last step inside
+`HistoricalStateMachine`/`UpdateStateMachine`. To force a rebuild
+without waiting for new source data (e.g. right after fixing a bug in
+the Gold build logic itself), rerun `historical`/`update` for the
+sources you care about — `main.py check-manifest-has-output` only
+skips Gold when that run's precursor stage wrote nothing new, so a
+run that does produce output always rebuilds Gold behind it.
