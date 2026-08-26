@@ -1,7 +1,9 @@
 """Unit tests for main.py's Gold Layer CLI wiring — run_stage() dispatch
-for stage="gold", which is what Step Functions' GoldStandardStateMachine
-actually invokes per source (see infrastructure/terraform/templates/
-gold_standard.asl.json.tpl)."""
+for stage="gold". --discover (used by GoldStandardStateMachine, see
+infrastructure/terraform/templates/gold_standard.asl.json.tpl) also
+requests legacy single-combined-file cleanup; the normal
+--input-manifest-driven historical/update wiring passes discover=False
+and leaves any legacy file alone."""
 import pytest
 
 import main
@@ -20,8 +22,9 @@ def test_gold_stage_dispatches_to_the_right_module_with_discovered_countries(mon
     def fake_discover_countries(storage_mode):
         return ["DE", "PL"]
 
-    def fake_run(*, storage_mode, countries):
-        calls.append({"storage_mode": storage_mode, "countries": countries})
+    def fake_run(*, storage_mode, countries, cleanup_legacy_file):
+        calls.append({"storage_mode": storage_mode, "countries": countries,
+                       "cleanup_legacy_file": cleanup_legacy_file})
         return StageResult().finalize(attempted=len(countries))
 
     monkeypatch.setattr(gold_module, "discover_countries", fake_discover_countries)
@@ -34,14 +37,17 @@ def test_gold_stage_dispatches_to_the_right_module_with_discovered_countries(mon
     )
 
     assert len(calls) == 1
-    assert calls[0] == {"storage_mode": "cloud", "countries": ["DE", "PL"]}
+    assert calls[0] == {"storage_mode": "cloud", "countries": ["DE", "PL"], "cleanup_legacy_file": True}
     assert result.status != "FAILED"
 
 
 def test_gold_stage_with_explicit_countries_skips_discovery(monkeypatch):
     calls = []
-    monkeypatch.setattr(main.ted_notices_gold, "run",
-                         lambda *, storage_mode, countries: calls.append(countries) or StageResult().finalize(1))
+    monkeypatch.setattr(
+        main.ted_notices_gold, "run",
+        lambda *, storage_mode, countries, cleanup_legacy_file:
+            calls.append((countries, cleanup_legacy_file)) or StageResult().finalize(1),
+    )
 
     main.run_stage(
         source="ted-notices", stage="gold", mode=None, storage_mode="local",
@@ -49,7 +55,7 @@ def test_gold_stage_with_explicit_countries_skips_discovery(monkeypatch):
         from_year=None, to_year=None, from_date=None, to_date=None,
     )
 
-    assert calls == [["DE"]]
+    assert calls == [(["DE"], False)]
 
 
 def test_gold_is_not_supported_for_reference_data_sources():

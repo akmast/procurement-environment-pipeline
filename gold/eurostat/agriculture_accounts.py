@@ -1,15 +1,18 @@
 """
 Eurostat regional agricultural accounts — Gold Layer.
 
-Reads every normalized JSON-stat-decoded Parquet file across every
-country/year currently on disk
+Reads normalized JSON-stat-decoded Parquet files
 (normalization.eurostat.agriculture_accounts — eurostat has no
-transformation stage, see main.py's FAMILY_STAGES), concatenates them
-into one table, keeps only the columns useful for analysis, renames
-them to Gold's own naming (see RENAME below — e.g. `geo` -> `nuts2`,
-this dataset's `geo` dimension is always a NUTS2 region code such as
-"DE11"), deduplicates exact repeat rows, and writes ONE combined file —
-no country/year split — to data/gold/eurostat/agriculture_accounts.parquet.
+transformation stage, see main.py's FAMILY_STAGES), keeps only the
+columns useful for analysis, renames them to Gold's own naming (see
+RENAME below — e.g. `geo` -> `nuts2`, this dataset's `geo` dimension is
+always a NUTS2 region code such as "DE11"), and writes **one Gold file
+per precursor partition** — mirroring normalization's own country/year
+partitioning, not one combined file for the whole source (see
+common/gold.py's module docstring for why: a run only reprocesses the
+specific partition(s) its precursor actually touched, via
+--input-manifest, exactly like normalization/transformation already
+do — see docs/pipelines/gold_layer.md).
 
 Dropped relative to the normalized table: the raw `unit` code (every
 row in this dataset is `MIO_EUR`, per
@@ -18,21 +21,22 @@ enough) and `time_label` (a string echo of `time`, e.g. "2021" for
 2021 — the typed `time` column already covers it).
 
 Every output column is cast to a fixed dtype (GOLD_DTYPES) right before
-write — never left to what pandas/pyarrow infer from concatenating
-partition files (see gold/eea/measurements.py's docstring for why that
-matters). A row missing any column is meaningless here (there's no
-"count-only" use case the way TED has) — REQUIRED_COLUMNS is every
-column except frequency_code/frequency_label, see
-common.gold.drop_missing_required.
+write — never left to what the precursor file's own dtype happens to
+be (see gold/eea/measurements.py's docstring for why that matters). A
+row missing any column is meaningless here (there's no "count-only"
+use case the way TED has) — REQUIRED_COLUMNS is every column except
+frequency_code/frequency_label, see common.gold.drop_missing_required.
 
 `countries` must be passed explicitly, same "explicit partitions only"
 convention as every other stage in this project — pass
-discover_countries(storage_mode) to combine every country currently
-normalized. Unlike normalization, Gold Layer always *rebuilds the whole
-combined file* from the countries given (there's no partition of its
-own to merge into) — passing a partial `countries` list here means the
-combined file only reflects those countries, not "these plus whatever
-was already there".
+discover_countries(storage_mode) to (re)process every country
+currently normalized (a full rebuild — see GoldStandardStateMachine,
+docs/pipelines/gold_layer.md), or the exact precursor file paths from
+this run's own normalization manifest (the normal AWS wiring — see
+main.py's --input-manifest) to process only what actually changed.
+Each partition's Gold file is simply overwritten in place — there's no
+separate reconciliation step needed, unlike a scheme that only ever
+appended new files.
 
 Reads/writes go through common.storage, so storage_mode="local"
 (default) and storage_mode="cloud" (S3) run the same logic.
@@ -50,15 +54,20 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from common.gold import build_gold_table, drop_missing_required, enforce_dtypes, write_gold_table
+from common.gold import build_gold_partition, drop_missing_required, enforce_dtypes, gold_partition_path, \
+    write_gold_table
 from common.manifest import StageResult
-from common.storage import list_files, resolve_paths
+from common.storage import delete, exists, list_files, resolve_paths
 from normalization.eurostat.agriculture_accounts import NORMALIZED_BASE_DIR
 
 logger = logging.getLogger(__name__)
 
 GOLD_BASE_DIR = "data/gold/eurostat"
-GOLD_FILENAME = "agriculture_accounts.parquet"
+GOLD_FILENAME_PREFIX = "agriculture_accounts"
+
+# The single combined file this module used to write, before Gold moved
+# to one file per precursor partition — see run()'s cleanup_legacy_file.
+_LEGACY_GOLD_PATH = f"{GOLD_BASE_DIR}/agriculture_accounts.parquet"
 
 # Source-column order — matches normalization.eurostat.agriculture_accounts's
 # output columns exactly (see that module's flatten/melt_json_stat), minus
@@ -121,16 +130,22 @@ def discover_countries(storage_mode: str) -> list[str]:
     return sorted({path[len(NORMALIZED_BASE_DIR):].lstrip("/").split("/")[0] for path in normalized_files})
 
 
-def run(storage_mode: str = "local", countries: list[str] | None = None) -> StageResult:
+def run(storage_mode: str = "local", countries: list[str] | None = None,
+        cleanup_legacy_file: bool = False) -> StageResult:
     if not countries:
         raise ValueError(
             "countries must be provided explicitly — e.g. countries=['DE'], or "
-            "countries=discover_countries(storage_mode) to combine every country "
+            "countries=discover_countries(storage_mode) to (re)process every country "
             "already normalized. run() does not default to processing everything on disk."
         )
 
     logger.info("Starting Eurostat agricultural accounts Gold build | countries=%s storage_mode=%s",
                 countries, storage_mode)
+
+    if cleanup_legacy_file and exists(_LEGACY_GOLD_PATH, storage_mode):
+        logger.info("Deleting legacy combined Gold file, superseded by per-partition files | path=%s",
+                     _LEGACY_GOLD_PATH)
+        delete(_LEGACY_GOLD_PATH, storage_mode)
 
     paths = resolve_paths(countries, NORMALIZED_BASE_DIR, storage_mode, suffix=".parquet")
     if not paths:
@@ -138,17 +153,22 @@ def run(storage_mode: str = "local", countries: list[str] | None = None) -> Stag
                         countries, NORMALIZED_BASE_DIR)
         return StageResult().finalize(attempted=0)
 
-    df = build_gold_table(paths, storage_mode, SOURCE_COLUMNS, rename=RENAME)
-    df = enforce_dtypes(df, GOLD_DTYPES)
-    df = drop_missing_required(df, REQUIRED_COLUMNS)
-
-    out_path = f"{GOLD_BASE_DIR}/{GOLD_FILENAME}"
-    write_gold_table(df, out_path, storage_mode)
-
     result = StageResult()
-    result.record_written(out_path)
-    logger.info("Eurostat agricultural accounts Gold build finished | source_files=%s rows=%s path=%s",
-                len(paths), len(df), out_path)
+    for path in paths:
+        try:
+            df = build_gold_partition(path, storage_mode, SOURCE_COLUMNS, rename=RENAME)
+            df = enforce_dtypes(df, GOLD_DTYPES)
+            df = drop_missing_required(df, REQUIRED_COLUMNS)
+
+            out_path = gold_partition_path(path, NORMALIZED_BASE_DIR, GOLD_BASE_DIR, GOLD_FILENAME_PREFIX)
+            write_gold_table(df, out_path, storage_mode)
+            result.record_written(out_path)
+        except Exception:
+            logger.exception("Eurostat agricultural accounts Gold build failed for partition | path=%s", path)
+            result.record_failed(path)
+
+    logger.info("Eurostat agricultural accounts Gold build finished | partitions=%s written=%s failed=%s",
+                len(paths), len(result.written_paths), len(result.failed_paths))
     return result.finalize(attempted=len(paths))
 
 

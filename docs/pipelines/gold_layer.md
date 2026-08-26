@@ -2,17 +2,27 @@
 
 ## What it is
 
-The final, analysis-ready layer: one Parquet file per source — no
-split by country, year, or pollutant — with only the columns useful
-for analysis, named and ordered explicitly. Built by `gold/<source>/*.py`
+The final, analysis-ready layer: **one Parquet file per precursor
+partition** — mirroring the precursor stage's own partitioning
+(country/year/pollutant for EEA, country only for TED, country/year
+for Eurostat) — with only the columns useful for analysis, named and
+ordered explicitly. Built by `gold/<source>/*.py`
 (`gold/eurostat/agriculture_accounts.py`, `gold/eea/measurements.py`,
-`gold/ted/notices.py`), each combining every partition of its
-precursor stage's output currently on disk.
+`gold/ted/notices.py`). Athena reads every file in a source's Gold
+folder as one table, so this is transparent at query time — it just
+means a Gold build never has to touch a partition it wasn't given.
 
-This is a full rebuild every run, not an incremental append: there's
-no Gold-level partitioning to merge into, so a Gold build always
-reflects exactly the countries it was given (normally *every* country
-currently normalized/transformed — see "Running it" below).
+A run processes only the partition(s) it's given (normally the exact
+partition(s) its precursor stage actually touched this run, via
+`--input-manifest` — see "Running it" below) and **overwrites** the
+matching Gold file(s) in place. It never appends: reprocessing the
+same partition always replaces its Gold file's entire content, so a
+row is never duplicated across two different files for the same
+partition. This matters especially for TED, since transformation
+always rewrites a touched country's *entire* notice history in one
+file, not just new notices — overwriting the matching Gold file in
+place (rather than writing a new file every run) is what keeps Athena
+from ever seeing the same notice twice.
 
 ## Where each source reads from
 
@@ -89,48 +99,52 @@ below). Renames are defined in each module's own `RENAME` dict.
 
 ## How a build works
 
+Each precursor partition is processed independently, one at a time
+(a failure on one partition is logged and recorded as failed —
+`common.manifest.StageResult` — without aborting the rest of the run):
+
 1. Discover (or accept explicit) countries, resolve every matching
-   Parquet file under the precursor stage's base directory
-   (`common.storage.resolve_paths`).
-2. Read and concatenate all of them (`common.gold.build_gold_table`).
+   precursor Parquet file (`common.storage.resolve_paths`) — normally
+   just the file(s) named in this run's own `--input-manifest`.
+2. Read that one precursor file (`common.gold.build_gold_partition`).
    A file missing an expected column is logged and contributes `NaN`
-   for it rather than failing the whole build.
-3. Select the columns above, in that order; apply the renames.
-4. Drop exact duplicate rows (`DataFrame.drop_duplicates()` —
-   deterministic: `resolve_paths`/`list_files` return sorted paths, so
-   the first occurrence kept is always the same one).
-5. Cast every column to its declared dtype (`common.gold.enforce_dtypes`,
+   for it rather than failing the whole build. Select the columns
+   above, in that order; apply the renames; drop exact duplicate rows
+   within that one file (`DataFrame.drop_duplicates()`).
+3. Cast every column to its declared dtype (`common.gold.enforce_dtypes`,
    each module's own `GOLD_DTYPES`) — never left to what pandas/pyarrow
-   happen to infer from concatenating partition files, which can drift
-   per-file (see "Dtypes are enforced, not inferred" below).
-6. Drop rows missing a required field (`common.gold.drop_missing_required`,
+   happen to infer from the precursor file, which can drift file to
+   file (see "Dtypes are enforced, not inferred" below).
+4. Drop rows missing a required field (`common.gold.drop_missing_required`,
    each module's own `REQUIRED_COLUMNS` — see "Null-guard rules" below).
-7. Write one file: `data/gold/<source>/<name>.parquet`
-   (`agriculture_accounts.parquet`, `measurements.parquet`,
-   `notices.parquet`).
+5. Compute the Gold path that mirrors this precursor file's own
+   partition segments (`common.gold.gold_partition_path` — e.g.
+   `data/transformed/eea/measurements/DE/2021/PM10/measurements.parquet`
+   becomes `data/gold/eea/measurements_DE_2021_PM10.parquet`) and
+   **overwrite** it — never append.
 
 Reads/writes go through `common.storage`, so `storage_mode="local"`/
 `"cloud"` run identically.
 
 ## Dtypes are enforced, not inferred
 
-A Gold build concatenates every partition file it finds — if one of
-them drifted in dtype (a stale file written by an older code version,
-a partition that happens to be all-null in one column), pandas'
-concatenation can silently widen the *whole* combined column to
-whatever type covers the mix (typically `object`). That's exactly what
-happened in production: `eea_measurements.pollutant_code` was cast to
-`Int64` by normalization, but the real Gold Parquet file had it as
+Athena reads every Parquet file in a source's Gold folder as one
+table, so if any one of those files drifted in dtype from the rest (a
+stale file written by an older code version, a partition that happens
+to be all-null in one column), the table's schema-on-read would break
+for every query, not just that partition. That's exactly what happened
+in production: `eea_measurements.pollutant_code` was cast to `Int64`
+by normalization, but the real Gold Parquet file had it as
 `large_string` — one drifted partition was enough — while
 `infrastructure/terraform/glue.tf` still declared it `bigint`, so every
 Athena query against the table failed with `HIVE_BAD_DATA: Field
 pollutant_code's type BINARY ... is incompatible with type bigint`.
 
-Each `gold/<source>/*.py` module now declares a `GOLD_DTYPES` dict
-(column -> dtype kind) applied via `common.gold.enforce_dtypes()` right
-after `build_gold_table()`, so the written Parquet file's schema is
-always exactly what's declared, regardless of what any individual
-partition file contained. **Every code/label/identifier column is
+Each `gold/<source>/*.py` module declares a `GOLD_DTYPES` dict (column
+-> dtype kind) applied via `common.gold.enforce_dtypes()` right after
+`build_gold_partition()`, so every partition file's schema is always
+exactly what's declared — independent of what that one precursor file,
+or any other partition's file, happens to contain. **Every code/label/identifier column is
 `string`, even ones that look numeric** — `pollutant_code` included —
 since these are categorical values (EEA vocabulary codes, NUTS codes,
 ...), not arithmetic ones, and can have leading zeros or non-digit
@@ -169,22 +183,29 @@ as missing too, not just an actual `NULL`/`NaN`.
 ## Running it
 
 **Locally / directly in Python** — `countries` is required, same
-"explicit partitions only" convention as every other stage:
+"explicit partitions only" convention as every other stage. Each
+listed country/partition is (re)written independently; nothing else
+under the source's Gold folder is touched:
 
 ```python
 from gold.eurostat.agriculture_accounts import run, discover_countries
-run(storage_mode="local", countries=discover_countries("local"))  # everything currently normalized
-run(storage_mode="local", countries=["DE", "PL"])                  # just these
+run(storage_mode="local", countries=discover_countries("local"))  # rebuild every partition currently normalized
+run(storage_mode="local", countries=["DE", "PL"])                  # just these partitions
 ```
 
 Same shape for `gold.eea.measurements` and `gold.ted.notices`.
+`cleanup_legacy_file=True` additionally deletes the source's old
+single combined Gold file (`data/gold/<source>/<name>.parquet`, from
+before this per-partition model), if one is still present — see
+"Migrating from the old combined-file model" below.
 
-**Via `main.py`** (the CLI Step Functions' ECS tasks actually run):
+**Via `main.py`** (the CLI Step Functions' ECS tasks actually run) —
+either `--countries`/`--paths` for specific partitions, or `--discover`
+for every partition currently on disk (and legacy-file cleanup):
 
 ```
-python main.py stage --source eurostat-agriculture-accounts --stage gold --discover --storage-mode cloud
+python main.py stage --source eurostat-agriculture-accounts --stage gold --countries DE PL --storage-mode cloud
 python main.py stage --source eea-measurements --stage gold --discover --storage-mode cloud
-python main.py stage --source ted-notices --stage gold --discover --storage-mode cloud
 ```
 
 **In AWS — automatically, inside `HistoricalStateMachine`/`UpdateStateMachine`.**
@@ -193,7 +214,8 @@ dependency graph) runs its own Gold build itself, right after its last
 data stage — `EeaRunTransformation`/`TedRunTransformation` for EEA/TED,
 `EurostatRunNormalization` for Eurostat (no transformation stage there,
 so Gold reads straight from normalization, per the table above) — but
-**only if that stage actually wrote something new this run**:
+**only if that stage actually wrote something new this run**, and even
+then **only for the partition(s) that stage actually touched**:
 
 ```
 ... last data stage ...
@@ -206,7 +228,8 @@ CheckHasNewData  (main.py check-manifest-has-output --run-id ... --source ... --
   new      something
    │           │
    ▼           ▼
- skip      RunGold  (main.py stage --source ... --stage gold --discover ...)
+ skip      RunGold  (main.py stage --source ... --stage gold --storage-mode cloud
+   │            --input-manifest s3://.../runs/<run_id>/<source>/<last-stage>.json)
    │           │
    └─────┬─────┘
          ▼
@@ -218,22 +241,31 @@ CheckHasNewData  (main.py check-manifest-has-output --run-id ... --source ... --
 `written_paths` is empty — a genuinely unremarkable outcome (e.g. a
 refresh that found nothing changed upstream), not an error. The ASL
 `Catch`es that non-zero exit straight to the branch's `Succeeded`
-state, skipping the Gold rebuild entirely — so no new (identical)
-Gold file gets written for no reason, and no wasted ECS task runs. A
-real Gold build failure, on the other hand, still fails the branch
-(and the overall historical/update run) the same as any other stage.
+state, skipping the Gold build entirely — so no wasted ECS task run.
+`RunGold` itself reads `--input-manifest` (the same file
+`CheckHasNewData` just confirmed is non-empty) to get the exact list
+of precursor paths this run touched — exactly the same mechanism
+`normalization`/`transformation` already use for their own
+`--input-manifest` wiring, not a Gold-specific one. Gold's own
+`written_paths` land in `runs/<run_id>/<source>/gold.json`. A real
+Gold build failure still fails the branch (and the overall
+historical/update run) the same as any other stage.
 
 This means Gold always reflects the latest transformed/normalized data
-after any historical or update run that changed something — nothing
-extra to run yourself.
+for exactly the partition(s) that changed, after any historical or
+update run that changed something — nothing extra to run yourself,
+and no already-Gold'd partition gets rewritten (or re-read) for no
+reason.
 
 **In AWS — manually, via `GoldStandardStateMachine`** (see
 `infrastructure/terraform/templates/gold_standard.asl.json.tpl`): a
 separate, supplementary state machine for an **unconditional** full
-rebuild of all three sources, regardless of whether anything changed
-recently — useful e.g. right after fixing a bug in the Gold build
-logic itself, without needing to re-run historical/update just to
-trigger a rebuild. Manual only, never on a schedule.
+rebuild of every partition of all three sources, regardless of whether
+anything changed recently — useful e.g. right after fixing a bug in
+the Gold build logic itself, without needing to re-run
+historical/update just to trigger a rebuild. This is also the state
+machine that performs legacy-file cleanup (see below). Manual only,
+never on a schedule.
 
 Start it via **Actions → Run Pipeline → Run workflow**, `state_machine: gold-standard`
 (`sources`/`countries`/`from_year`/`to_year`/`run_id`/`start_stage` are
@@ -246,5 +278,27 @@ aws stepfunctions start-execution \
 ```
 
 The external input is deliberately empty — `{}` — there is nothing to
-select; every build always discovers and combines everything currently
-available for its source.
+select; every build always rebuilds (`--discover`) every partition
+currently available for its source.
+
+## Migrating from the old combined-file model
+
+Before this per-partition model, each source wrote one combined file:
+`data/gold/<source>/<name>.parquet` (`agriculture_accounts.parquet`,
+`measurements.parquet`, `notices.parquet`). Athena reads every file
+under a source's Gold folder as one table, so if that old combined
+file is still present alongside the new per-partition files, every row
+it contains would be double-counted against the same row now also
+living in a partition file.
+
+`gold/<source>/*.py`'s `run(..., cleanup_legacy_file=True)` deletes
+that old combined file, if still present, before writing anything —
+but only when called with `--discover` (i.e. only from
+`GoldStandardStateMachine`; an ordinary `historical`/`update` run
+always passes `cleanup_legacy_file=False` and leaves it alone, since
+it only ever touches the partition(s) that changed and has no reason
+to assume every other partition has already been migrated). **Run
+`GoldStandardStateMachine` once after deploying this change** to fully
+retire each source's old combined file — until that runs, the old file
+stays in place and Athena queries against that source's table will
+double-count every row it contains.

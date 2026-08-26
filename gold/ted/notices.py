@@ -1,15 +1,18 @@
 """
 TED procurement notices — Gold Layer.
 
-Reads every transformed notices Parquet file (transformation.ted.notices
-— already deduplicated and codelist-labeled, one file per country, no
-year partitioning for this source) across every country currently on
-disk, concatenates them into one table, keeps only the columns useful
-for analysis, renames them to Gold's own naming (see RENAME below —
-e.g. `publication_number` -> `notice_publication_number`, `nuts` ->
-`place_of_performance_nuts`), deduplicates exact repeat rows, and
-writes ONE combined file — no country split — to
-data/gold/ted/notices.parquet.
+Reads transformed notices Parquet files (transformation.ted.notices —
+already deduplicated and codelist-labeled, one file per country, no
+year partitioning for this source), keeps only the columns useful for
+analysis, renames them to Gold's own naming (see RENAME below — e.g.
+`publication_number` -> `notice_publication_number`, `nuts` ->
+`place_of_performance_nuts`), and writes **one Gold file per country**
+— mirroring transformation's own per-country partitioning, not one
+combined file for the whole source (see common/gold.py's module
+docstring for why: a run only reprocesses the country/countries its
+precursor actually touched, via --input-manifest, exactly like
+normalization/transformation already do — see
+docs/pipelines/gold_layer.md).
 
 Kept from the transformed table: the core notice identity/value fields
 plus NUTS codes and their labels (`nuts`/`nuts1`/`nuts2`/`nuts3`,
@@ -21,26 +24,30 @@ analysis, and none of them collide with drop_duplicates() (lists are
 unhashable, so keeping them would break exact-row deduplication).
 
 Every output column is cast to a fixed dtype (GOLD_DTYPES) right before
-write — never left to what pandas/pyarrow infer from concatenating
-partition files (see gold/eea/measurements.py's docstring for why that
-matters). Rows missing an identifying field (REQUIRED_COLUMNS) are
-dropped — but NOT rows missing `contract_total_value`/
-`contract_currency_code`: a notice with an unknown value is still a
-real notice for count-based metrics (`COUNT(DISTINCT
-notice_publication_number)`), just not usable for value aggregation.
-Any query that sums/averages `contract_total_value` must filter
-`WHERE contract_total_value IS NOT NULL AND contract_currency_code IS
-NOT NULL` itself — Gold Layer does not do that filtering, since it
-would silently make the table wrong for the count use case.
+write — never left to what the precursor file's own dtype happens to
+be (see gold/eea/measurements.py's docstring for why that matters).
+Rows missing an identifying field (REQUIRED_COLUMNS) are dropped — but
+NOT rows missing `contract_total_value`/`contract_currency_code`: a
+notice with an unknown value is still a real notice for count-based
+metrics (`COUNT(DISTINCT notice_publication_number)`), just not usable
+for value aggregation. Any query that sums/averages
+`contract_total_value` must filter `WHERE contract_total_value IS NOT
+NULL AND contract_currency_code IS NOT NULL` itself — Gold Layer does
+not do that filtering, since it would silently make the table wrong
+for the count use case.
 
 `countries` must be passed explicitly, same "explicit partitions only"
 convention as every other stage in this project — pass
-discover_countries(storage_mode) to combine every country currently
-transformed. Unlike transformation, Gold Layer always *rebuilds the
-whole combined file* from the countries given (there's no partition of
-its own to merge into) — passing a partial `countries` list here means
-the combined file only reflects those countries, not "these plus
-whatever was already there".
+discover_countries(storage_mode) to (re)process every country
+currently transformed (a full rebuild — see GoldStandardStateMachine,
+docs/pipelines/gold_layer.md), or the exact precursor file paths from
+this run's own transformation manifest (the normal AWS wiring — see
+main.py's --input-manifest) to process only what actually changed.
+Each country's Gold file is simply overwritten in place — this matters
+specifically for TED, since transformation always rewrites a touched
+country's *entire* notice history in one file, not just new notices;
+overwriting the matching Gold file in place is what keeps Athena from
+ever seeing the same notice twice across two different Gold files.
 
 Reads/writes go through common.storage, so storage_mode="local"
 (default) and storage_mode="cloud" (S3) run the same logic.
@@ -58,15 +65,20 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from common.gold import build_gold_table, drop_missing_required, enforce_dtypes, write_gold_table
+from common.gold import build_gold_partition, drop_missing_required, enforce_dtypes, gold_partition_path, \
+    write_gold_table
 from common.manifest import StageResult
-from common.storage import list_files, resolve_paths
+from common.storage import delete, exists, list_files, resolve_paths
 from transformation.ted.notices import NOTICES_FILENAME, TRANSFORMED_BASE_DIR
 
 logger = logging.getLogger(__name__)
 
 GOLD_BASE_DIR = "data/gold/ted"
-GOLD_FILENAME = "notices.parquet"
+GOLD_FILENAME_PREFIX = "notices"
+
+# The single combined file this module used to write, before Gold moved
+# to one file per precursor partition — see run()'s cleanup_legacy_file.
+_LEGACY_GOLD_PATH = f"{GOLD_BASE_DIR}/notices.parquet"
 
 # Source-column order — a subset of transformation.ted.notices's output
 # columns (see that module's add_codelist_labels/deduplicate_notices).
@@ -120,15 +132,21 @@ def discover_countries(storage_mode: str) -> list[str]:
     return sorted({path[len(TRANSFORMED_BASE_DIR):].lstrip("/").split("/")[0] for path in transformed_files})
 
 
-def run(storage_mode: str = "local", countries: list[str] | None = None) -> StageResult:
+def run(storage_mode: str = "local", countries: list[str] | None = None,
+        cleanup_legacy_file: bool = False) -> StageResult:
     if not countries:
         raise ValueError(
             "countries must be provided explicitly — e.g. countries=['DE'], or "
-            "countries=discover_countries(storage_mode) to combine every country "
+            "countries=discover_countries(storage_mode) to (re)process every country "
             "already transformed. run() does not default to processing everything on disk."
         )
 
     logger.info("Starting TED notices Gold build | countries=%s storage_mode=%s", countries, storage_mode)
+
+    if cleanup_legacy_file and exists(_LEGACY_GOLD_PATH, storage_mode):
+        logger.info("Deleting legacy combined Gold file, superseded by per-partition files | path=%s",
+                     _LEGACY_GOLD_PATH)
+        delete(_LEGACY_GOLD_PATH, storage_mode)
 
     paths = resolve_paths(countries, TRANSFORMED_BASE_DIR, storage_mode, suffix=".parquet")
     if not paths:
@@ -136,17 +154,22 @@ def run(storage_mode: str = "local", countries: list[str] | None = None) -> Stag
                         countries, TRANSFORMED_BASE_DIR)
         return StageResult().finalize(attempted=0)
 
-    df = build_gold_table(paths, storage_mode, SOURCE_COLUMNS, rename=RENAME)
-    df = enforce_dtypes(df, GOLD_DTYPES)
-    df = drop_missing_required(df, REQUIRED_COLUMNS)
-
-    out_path = f"{GOLD_BASE_DIR}/{GOLD_FILENAME}"
-    write_gold_table(df, out_path, storage_mode)
-
     result = StageResult()
-    result.record_written(out_path)
-    logger.info("TED notices Gold build finished | source_files=%s rows=%s path=%s",
-                len(paths), len(df), out_path)
+    for path in paths:
+        try:
+            df = build_gold_partition(path, storage_mode, SOURCE_COLUMNS, rename=RENAME)
+            df = enforce_dtypes(df, GOLD_DTYPES)
+            df = drop_missing_required(df, REQUIRED_COLUMNS)
+
+            out_path = gold_partition_path(path, TRANSFORMED_BASE_DIR, GOLD_BASE_DIR, GOLD_FILENAME_PREFIX)
+            write_gold_table(df, out_path, storage_mode)
+            result.record_written(out_path)
+        except Exception:
+            logger.exception("TED notices Gold build failed for partition | path=%s", path)
+            result.record_failed(path)
+
+    logger.info("TED notices Gold build finished | partitions=%s written=%s failed=%s",
+                len(paths), len(result.written_paths), len(result.failed_paths))
     return result.finalize(attempted=len(paths))
 
 

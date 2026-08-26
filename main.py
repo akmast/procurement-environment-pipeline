@@ -260,25 +260,34 @@ def run_stage(*, source, stage, mode, storage_mode, countries, paths, discover,
                                                 eurostat_agriculture_accounts_norm.discover_countries, storage_mode)
         return eurostat_agriculture_accounts_norm.run(storage_mode=storage_mode, countries=resolved)
 
-    # Gold Layer — combines every country/year of the precursor stage's
-    # output into one Parquet file (see gold/<source>/*.py's own
-    # docstrings for exactly which precursor stage each reads and why).
-    # Always used with --discover in practice (Step Functions' Gold
-    # Standard state machine, see infrastructure/terraform/templates/
-    # gold_standard.asl.json.tpl) since Gold's whole point is combining
-    # everything currently available, not a specific changed subset.
+    # Gold Layer — writes one Parquet file per precursor partition (see
+    # gold/<source>/*.py's own docstrings for exactly which precursor
+    # stage each reads, and why one file per partition rather than one
+    # combined file). Normal historical/update wiring uses
+    # --input-manifest, exactly like normalization/transformation, so a
+    # run only reprocesses the partition(s) its precursor actually
+    # touched this run. --discover (the Gold Standard state machine, see
+    # infrastructure/terraform/templates/gold_standard.asl.json.tpl)
+    # instead (re)processes every partition currently on disk — a full,
+    # unconditional rebuild — and is the only case that also deletes the
+    # legacy single combined Gold file if one is still present, since a
+    # deliberate full rebuild is the natural place to finish migrating
+    # away from it.
     if key == ("eea-measurements", "gold"):
         resolved = _resolve_paths_or_countries(paths, countries, discover,
                                                 eea_measurements_gold.discover_countries, storage_mode)
-        return eea_measurements_gold.run(storage_mode=storage_mode, countries=resolved)
+        return eea_measurements_gold.run(storage_mode=storage_mode, countries=resolved,
+                                          cleanup_legacy_file=discover)
     if key == ("ted-notices", "gold"):
         resolved = _resolve_paths_or_countries(paths, countries, discover,
                                                 ted_notices_gold.discover_countries, storage_mode)
-        return ted_notices_gold.run(storage_mode=storage_mode, countries=resolved)
+        return ted_notices_gold.run(storage_mode=storage_mode, countries=resolved,
+                                     cleanup_legacy_file=discover)
     if key == ("eurostat-agriculture-accounts", "gold"):
         resolved = _resolve_paths_or_countries(paths, countries, discover,
                                                 eurostat_agriculture_accounts_gold.discover_countries, storage_mode)
-        return eurostat_agriculture_accounts_gold.run(storage_mode=storage_mode, countries=resolved)
+        return eurostat_agriculture_accounts_gold.run(storage_mode=storage_mode, countries=resolved,
+                                                        cleanup_legacy_file=discover)
 
     raise ValueError(
         f"Unsupported (source, stage) combination: source={source!r} stage={stage!r} — "
